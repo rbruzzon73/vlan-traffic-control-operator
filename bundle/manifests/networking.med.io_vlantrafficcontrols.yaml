@@ -1,0 +1,206 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.1
+  name: vlantrafficcontrols.networking.med.io
+spec:
+  group: networking.med.io
+  names:
+    kind: VlanTrafficControl
+    listKind: VlanTrafficControlList
+    plural: vlantrafficcontrols
+    singular: vlantrafficcontrol
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: VlanTrafficControl configures bidirectional TC bandwidth shaping
+          and policing rules per node.
+        properties:
+          apiVersion:
+            description: APIVersion defines the versioned schema of this representation
+              of an object.
+            type: string
+          kind:
+            description: Kind is a string value representing the REST resource this
+              object represents.
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: Specification of the desired traffic control configuration.
+            properties:
+              htbRoot:
+                description: Defines the root HTB qdisc and per-VLAN classes.
+                properties:
+                  classes:
+                    description: List of per-VLAN traffic control class definitions.
+                    items:
+                      description: VlanClassSpec defines parameters for a single VLAN
+                        traffic control class.
+                      properties:
+                        burst:
+                          type: string
+                        ceil:
+                          type: string
+                        classID:
+                          description: 'Unique HTB class identifier (e.g., 1:10).
+                            [REQUIRED - MUST | Default: None]'
+                          type: string
+                        classId:
+                          description: 'Unique HTB class identifier (e.g., 1:10).
+                            [REQUIRED - MUST | Default: None]'
+                          type: string
+                        egressBurst:
+                          description: 'Outbound burst buffer size (Units: Bytes or
+                            KB, e.g., 15k, 32Kb). [OPTIONAL | Default: Calculated
+                            automatically]'
+                          type: string
+                        egressCeil:
+                          description: 'Maximum allowed outbound burst bandwidth (Units:
+                            Mbit/s or Gbit/s, e.g., 100Mbit). [OPTIONAL | Default:
+                            Same as Egress Rate]'
+                          type: string
+                        egressRate:
+                          description: 'Guaranteed outbound bandwidth rate (Units:
+                            Mbit/s or kbit/s, e.g., 50Mbit). [REQUIRED - MUST | Default:
+                            None]'
+                          type: string
+                        enableFqCodel:
+                          default: true
+                          description: 'Toggles attaching fq_codel leaf qdisc to prevent
+                            bufferbloat. [REQUIRED - MUST | Default: true (Enabled)]'
+                          type: boolean
+                        ingressBurst:
+                          description: 'Incoming policing burst buffer size (Units:
+                            Bytes or KB, e.g., 10k). [OPTIONAL | Default: Calculated
+                            automatically]'
+                          type: string
+                        ingressRate:
+                          description: 'Hard policing bandwidth cap for incoming traffic
+                            (Units: Mbit/s or Gbit/s, e.g., 20Mbit). [REQUIRED - MUST
+                            | Default: None]'
+                          type: string
+                        priority:
+                          default: 0
+                          description: 'HTB Priority level (Range: 0 to 7). Lower
+                            numbers indicate HIGHER priority for borrowing excess
+                            unallocated bandwidth (0 = Highest Priority, 7 = Lowest
+                            Priority). [OPTIONAL | Default: 0]'
+                          maximum: 7
+                          minimum: 0
+                          type: integer
+                        rate:
+                          type: string
+                        vlanID:
+                          description: '802.1Q VLAN tag ID to match (Range: 1 to 4094).
+                            [REQUIRED - MUST | Default: None]'
+                          maximum: 4094
+                          minimum: 1
+                          type: integer
+                        vlanId:
+                          description: '802.1Q VLAN tag ID to match (Range: 1 to 4094).
+                            [REQUIRED - MUST | Default: None]'
+                          maximum: 4094
+                          minimum: 1
+                          type: integer
+                      required:
+                      - classId
+                      - egressRate
+                      - enableFqCodel
+                      - ingressRate
+                      - vlanId
+                      type: object
+                    type: array
+                  defaultClassId:
+                    default: 1:99
+                    description: 'HTB class ID where unclassified traffic is directed
+                      (e.g., 1:99). [REQUIRED - MUST | Default: 1:99]'
+                    type: string
+                  htbId:
+                    default: 1
+                    description: 'Optional custom HTB handle ID (e.g., 1). [OPTIONAL
+                      | Default: 1]'
+                    type: integer
+                  interface:
+                    description: 'Target physical or bond network interface name (e.g.,
+                      eth0, bond0). [REQUIRED - MUST | Default: None]'
+                    type: string
+                  rate:
+                    description: 'Total root egress bandwidth allocated to parent
+                      HTB class (Units: Mbit/s or Gbit/s, e.g., 10Gbit, 1000Mbit).
+                      [REQUIRED - MUST | Default: None]'
+                    type: string
+                required:
+                - classes
+                - interface
+                - rate
+                type: object
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: 'Map of node labels used to select target worker nodes
+                  (e.g., node-role.kubernetes.io/worker: ''''). [OPTIONAL | Default:
+                  None]'
+                type: object
+              reconcileIntervalSeconds:
+                default: 30
+                description: 'Interval in seconds between node agent reconciliation
+                  loops. [OPTIONAL | Default: 30]'
+                type: integer
+              tcStrategy:
+                default: flower
+                description: 'Traffic classification strategy used by TC. Select ''flower''
+                  for eBPF/Flower offload or ''u32'' for legacy raw bitwise matching.
+                  [REQUIRED - MUST | Default: flower]'
+                enum:
+                - flower
+                - u32
+                type: string
+            required:
+            - htbRoot
+            - tcStrategy
+            type: object
+          status:
+            description: VlanTrafficControlStatus defines the observed state of VlanTrafficControl
+            properties:
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      type: integer
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

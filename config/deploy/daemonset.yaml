@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vlan-traffic-control-agent
+  namespace: vlan-traffic-control-system
+  labels:
+    app: vlan-traffic-control-agent
+spec:
+  selector:
+    matchLabels:
+      app: vlan-traffic-control-agent
+  template:
+    metadata:
+      labels:
+        app: vlan-traffic-control-agent
+    spec:
+      serviceAccountName: vlan-traffic-control-agent-sa
+      hostNetwork: true
+      hostPID: true
+      nodeSelector:
+        node-role.kubernetes.io/worker: ""
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+      containers:
+        - name: agent
+          image: ghcr.io/rbruzzon73/vlan-traffic-control:latest
+          imagePullPolicy: Always
+          command:
+            - /agent
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+                - SYS_ADMIN
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+            - name: host-modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: host-sys
+              mountPath: /sys
+            - name: host-var-run
+              mountPath: /var/run
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+        - name: host-modules
+          hostPath:
+            path: /lib/modules
+        - name: host-sys
+          hostPath:
+            path: /sys
+        - name: host-var-run
+          hostPath:
+            path: /var/run

@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iperf3-client-vlan100
+  namespace: default
+spec:
+  hostNetwork: true
+  nodeName: hub-worker02.ocp4-hub.test.com
+  containers:
+  - name: iperf3
+    image: networkstatic/iperf3
+    command: ["iperf3", "-c", "10.0.100.21", "-B", "10.0.100.22", "-p", "5201", "-t", "60", "-i", "2"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iperf3-client-vlan280
+  namespace: default
+spec:
+  hostNetwork: true
+  nodeName: hub-worker02.ocp4-hub.test.com
+  containers:
+  - name: iperf3
+    image: networkstatic/iperf3
+    command: ["iperf3", "-c", "10.0.218.21", "-B", "10.0.218.22", "-p", "5202", "-t", "60", "-i", "2"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iperf3-client-vlan380
+  namespace: default
+spec:
+  hostNetwork: true
+  nodeName: hub-worker02.ocp4-hub.test.com
+  containers:
+  - name: iperf3
+    image: networkstatic/iperf3
+    command: ["iperf3", "-c", "10.0.238.21", "-B", "10.0.238.22", "-p", "5203", "-t", "60", "-i", "2"]

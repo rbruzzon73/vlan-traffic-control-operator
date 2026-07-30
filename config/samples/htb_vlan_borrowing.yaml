@@ -1,0 +1,37 @@
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: htb-vlan-borrowing-policy
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  htbRoot:
+    interface: "bond0"
+    rate: "10Gbit"
+    defaultClassId: 5000
+    classes:
+      # High Priority VLAN (e.g. Storage / FC Backup)
+      - classId: 474
+        vlanId: 474
+        rate: "2Gbit"
+        ceil: "10Gbit"
+        priority: 0
+        burst: "1250b"
+        enableFqCodel: true
+
+      # VM Migration VLAN
+      - classId: 280
+        vlanId: 280
+        rate: "2Gbit"
+        ceil: "10Gbit"
+        priority: 2
+        burst: "1250b"
+        enableFqCodel: true
+
+      # Default Unclassified Traffic
+      - classId: 5000
+        rate: "2Gbit"
+        ceil: "10Gbit"
+        priority: 1
+        burst: "1250b"
+        enableFqCodel: true

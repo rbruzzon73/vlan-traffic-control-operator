@@ -1,0 +1,256 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.1
+  name: vlantrafficcontrols.networking.med.io
+spec:
+  group: networking.med.io
+  names:
+    kind: VlanTrafficControl
+    listKind: VlanTrafficControlList
+    plural: vlantrafficcontrols
+    singular: vlantrafficcontrol
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: VlanTrafficControl is the Schema for the vlantrafficcontrols
+          API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VlanTrafficControlSpec defines the desired state of VlanTrafficControl.
+            properties:
+              htbRoot:
+                description: Root HTB configuration parameters. [REQUIRED]
+                properties:
+                  classes:
+                    description: List of traffic control classes configured on this
+                      interface. [REQUIRED]
+                    items:
+                      description: VlanClassSpec defines rules for a single traffic
+                        class (VLAN, Subnet, or SKB Mark).
+                      properties:
+                        classMinor:
+                          description: |-
+                            HTB minor class identifier (e.g., 10 for handle X:10).
+                            Combined automatically with htbRoot.htbId to build the full TC class handle. [REQUIRED]
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                        egressBurst:
+                          description: 'Outbound burst buffer size (Units: KB or Bytes,
+                            e.g., "15k"). [OPTIONAL]'
+                          type: string
+                        egressCeil:
+                          description: Maximum allowed outbound burst bandwidth ceiling
+                            (e.g., "100Mbit", "2Gbit"). [OPTIONAL]
+                          type: string
+                        egressRate:
+                          description: Guaranteed outbound bandwidth rate (e.g., "50Mbit",
+                            "1Gbit"). [REQUIRED]
+                          type: string
+                        enableFqCodel:
+                          default: true
+                          description: Toggles attaching fq_codel leaf qdisc to prevent
+                            bufferbloat. [OPTIONAL]
+                          type: boolean
+                        ingressBurst:
+                          description: 'Incoming policing burst buffer size (Units:
+                            KB or Bytes, e.g., "10k"). [OPTIONAL]'
+                          type: string
+                        ingressRate:
+                          description: Hard policing bandwidth cap for incoming traffic
+                            (e.g., "20Mbit"). [OPTIONAL]
+                          type: string
+                        mark:
+                          description: Socket buffer mark (skbmark) set by OVS/iptables
+                            (e.g., 100 or 16). Required if matchType is "mark". [OPTIONAL]
+                          format: int32
+                          type: integer
+                        matchType:
+                          allOf:
+                          - enum:
+                            - vlan
+                            - subnet
+                            - mark
+                            - auto
+                          - enum:
+                            - vlan
+                            - subnet
+                            - mark
+                            - auto
+                          default: auto
+                          description: |-
+                            MatchType explicitly selects the classification strategy:
+                            - "vlan": Matches 802.1Q tagged traffic using vlanId (Range: 1-4094).
+                            - "subnet": Matches untagged/stripped traffic based on IP network CIDR using subnet.
+                            - "mark": Matches packets marked by OVS or iptables using mark (skbmark).
+                            - "auto" (default): Automatically selects "vlan" if vlanId is set, "subnet" if subnet is set, or "mark" if mark is set. [OPTIONAL]
+                          type: string
+                        name:
+                          description: Descriptive name for this traffic class. [OPTIONAL]
+                          type: string
+                        priority:
+                          default: 0
+                          description: HTB Priority level (0=Highest Priority, 7=Lowest
+                            Priority). [OPTIONAL]
+                          maximum: 7
+                          minimum: 0
+                          type: integer
+                        subnet:
+                          description: Subnet (CIDR) to match untagged or stripped
+                            traffic (e.g., "10.100.0.0/24"). Required if matchType
+                            is "subnet". [OPTIONAL]
+                          type: string
+                        vlanId:
+                          description: '802.1Q VLAN tag ID to match (Range: 1 to 4094).
+                            Required if matchType is "vlan". [OPTIONAL]'
+                          maximum: 4094
+                          minimum: 1
+                          type: integer
+                      required:
+                      - classMinor
+                      - egressRate
+                      type: object
+                    type: array
+                  defaultClassMinor:
+                    default: 99
+                    description: Default class minor ID where unclassified traffic
+                      is routed (e.g., 99 for handle X:99). [OPTIONAL]
+                    type: integer
+                  htbId:
+                    default: 1
+                    description: Custom HTB root handle ID (e.g., 1 for handle 1:0,
+                      2 for handle 2:0). [OPTIONAL]
+                    type: integer
+                  interface:
+                    description: Target physical, bond, or bridge network interface
+                      name (e.g., "enp1s0", "br-ex"). [REQUIRED]
+                    type: string
+                  rate:
+                    description: Total root egress bandwidth rate capacity (e.g.,
+                      "10Gbit"). [REQUIRED]
+                    type: string
+                required:
+                - classes
+                - interface
+                - rate
+                type: object
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: Map of node labels used to select target worker nodes.
+                  [OPTIONAL]
+                type: object
+              reconcileIntervalSeconds:
+                default: 30
+                description: Interval in seconds between node agent reconciliation
+                  loops. [OPTIONAL]
+                type: integer
+              tcStrategy:
+                allOf:
+                - enum:
+                  - flower
+                  - u32
+                  - auto
+                - enum:
+                  - flower
+                  - u32
+                  - auto
+                default: flower
+                description: 'Strategy used to classify traffic: "flower", "u32",
+                  or "auto". [REQUIRED]'
+                type: string
+            required:
+            - htbRoot
+            - tcStrategy
+            type: object
+          status:
+            description: VlanTrafficControlStatus defines the observed runtime status
+              and conditions aggregated across worker node agents.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

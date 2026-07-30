@@ -1,0 +1,73 @@
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: vlan-tc-workers
+  namespace: openshift-vlan-tc-operator
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  reconcileIntervalSeconds: 60
+  tcStrategy: "flower"
+  htbRoot:
+    interface: "enp1s0"
+    htbId: 1
+    rate: "10Gbit"
+    defaultClassId: "1:99"
+    classes:
+      # -----------------------------------------------------------------------
+      # 1. Standard 802.1Q VLAN Tag Matching (Explicit matchType: vlan)
+      # -----------------------------------------------------------------------
+      - name: "storage-vlan-tagged"
+        matchType: "vlan"
+        vlanId: 100
+        classId: "1:100"
+        priority: 1
+        egressRate: "50Mbit"
+        egressCeil: "10Gbit"
+        egressBurst: "15k"
+        ingressRate: "25Mbit"
+        ingressBurst: "50k"
+        enableFqCodel: true
+
+      # -----------------------------------------------------------------------
+      # 2. IP Subnet Fallback Matching (OVS tag stripped for VM networks)
+      # -----------------------------------------------------------------------
+      - name: "vm-subnet-untagged"
+        matchType: "subnet"
+        subnet: "10.200.0.0/24"
+        classId: "1:280"
+        priority: 2
+        egressRate: "200Mbit"
+        egressCeil: "200Mbit"
+        egressBurst: "30k"
+        ingressRate: "200Mbit"
+        ingressBurst: "30k"
+        enableFqCodel: true
+
+      # -----------------------------------------------------------------------
+      # 3. SKB Mark Matching (Matched by kernel socket buffer mark)
+      # -----------------------------------------------------------------------
+      - name: "ovs-marked-flow"
+        matchType: "mark"
+        mark: 16
+        classId: "1:380"
+        priority: 3
+        egressRate: "500Mbit"
+        egressCeil: "500Mbit"
+        egressBurst: "50k"
+        ingressRate: "100Mbit"
+        ingressBurst: "20k"
+        enableFqCodel: true
+
+      # -----------------------------------------------------------------------
+      # 4. Auto-Detection Mode (Infers strategy from non-empty fields)
+      # -----------------------------------------------------------------------
+      - name: "auto-detect-vlan"
+        matchType: "auto"
+        vlanId: 400
+        classId: "1:400"
+        priority: 4
+        egressRate: "1Gbit"
+        egressCeil: "2Gbit"
+        ingressRate: "500Mbit"
+        enableFqCodel: false

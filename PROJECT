@@ -1,0 +1,8 @@
+domain: med.io
+layout:
+- go.kubebuilder.io/v4
+projectName: vlan-traffic-control
+repo: networking.med.io/vlan-traffic-control
+version: "3"
+plugins:
+  go.sdk.operatorframework.io/v1: {}

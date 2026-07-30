@@ -1,0 +1,15 @@
+# Binaries
+bin/
+main
+agent
+
+# Test and coverage artifacts
+cover.out
+
+# Go dependencies / vendoring (optional if you don't commit vendor)
+# vendor/
+
+# OS / Editor files
+.DS_Store
+.vscode/
+.idea/

@@ -10,7 +10,6 @@ Standard Kubernetes bandwidth plugins are often limited to basic pod-level ingre
 
 The operator follows a dual-component architecture consisting of a cluster-wide **Controller Manager** and host-bound **Node Agents**:
 
-~~~
 +-----------------------------------------------------------------------------------+
 |                                 OpenShift Cluster                                 |
 |                                                                                   |
@@ -42,7 +41,6 @@ The operator follows a dual-component architecture consisting of a cluster-wide 
 |  |       +--------------+                              +--------------------+  |  |
 |  +-----------------------------------------------------------------------------+  |
 +-----------------------------------------------------------------------------------+
-~~~
 
 #### 1. Controller Manager (`cmd/manager`)
 * Watches `VlanTrafficControl` Custom Resources cluster-wide.

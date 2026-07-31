@@ -337,7 +337,7 @@ spec:
         enableFqCodel: false
 ```
 
-
+---
 
 ## VLAN Traffic Control & Bridge Architecture
 
@@ -598,4 +598,225 @@ Because `tc` evaluates packets on `enp1s0.100` before the driver attaches 802.1Q
        |  STATUS: [NO TAG] ❌                               |
        +----------------------------------------------------+
 ```
+
+---
+
+
+## MACVLAN Traffic Control & Architecture (VLAN Tag Matching)
+
+This section documents the Traffic Control (TC) configuration, Multus MACVLAN CNI setup, and kernel-level packet flow when using a MACVLAN interface where TC matches frames directly by **VLAN ID 100** (`matchType: vlan`).
+
+---
+
+### 1. Custom Resource Definition (CRD) Configuration
+
+In this setup, your CRD uses `matchType: vlan` with `vlanId: 100` to intercept tagged 802.1Q traffic on the physical master interface (`enp1s0`):
+
+```yaml
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: vlan-tc-vlan100-macvlan
+spec:
+  htbRoot:
+    interface: enp1s0  # Master trunk interface
+    rate: 10Gbit
+    defaultClassId: "1:99"
+    htbId: 1
+    classes:
+    - classId: "1:100"
+      name: storage-vlan-100
+      priority: 1
+      matchType: vlan
+      vlanId: 100
+      egressRate: 50Mbit
+      egressCeil: 10Gbit
+      egressBurst: 15k
+      ingressRate: 30Mbit
+      ingressBurst: 50k
+      enableFqCodel: true
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  reconcileIntervalSeconds: 30
+  tcStrategy: flower
+```
+
+---
+
+### 2. Multus NetworkAttachmentDefinition (NAD)
+
+The VM pod connects its secondary interface directly to the sub-interface `enp1s0.100` using MACVLAN in `bridge` mode:
+
+```yaml
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: vlan100-network
+  namespace: default
+spec:
+  config: '{
+      "cniVersion": "0.3.1",
+      "name": "vlan100-network",
+      "type": "macvlan",
+      "master": "enp1s0.100",
+      "mode": "bridge",
+      "ipam": {}
+    }'
+```
+
+---
+
+### 3. Verification & Metrics Monitoring
+
+Check the active class counters on `enp1s0` for Class `1:100`:
+
+```bash
+# Query HTB class counters for VLAN 100 on enp1s0
+oc debug node/<worker-node> -- bash -c 'chroot /host tc -s class show dev enp1s0 classid 1:100'
+```
+
+#### Example Command Output
+
+```text
+class htb 1:100 parent 1:1 leaf 100: prio 1 rate 50Mbit ceil 10Gbit burst 15Kb cburst 0b
+ Sent 109326 bytes 1269 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+ lended: 1269 borrowed: 0 giants: 0
+ tokens: 38215 ctokens: 14
+```
+
+---
+
+### 4. Host Node MACVLAN Architecture (VLAN 100 Tagged)
+
+```text
++-----------------------------------------------------------------------------------+
+| HOST NODE (Linux Kernel)                                                          |
+|                                                                                   |
+|  +-----------------------------------------------------------------------------+  |
+|  | VM Pod (test-vm-vlan100)                                                    |  |
+|  |   Interface: eth1 (10.0.100.50) / macvlan0                                  |  |
+|  +-----------------------------------+-----------------------------------------+  |
+|                                      |                                            |
+|                                      | [Direct MACVLAN Untagged Payload]          |
+|                                      v                                            |
+|  +-----------------------------------------------------------------------------+  |
+|  | Host Sub-Interface: enp1s0.100 (Sub-interface driver attaches 802.1Q tag)   |  |
+|  +-----------------------------------+-----------------------------------------+  |
+|                                      |                                            |
+|                                      | Frame tagged with 802.1Q (VID 100)         |
+|                                      v                                            |
+|  +-----------------------------------------------------------------------------+  |
+|  | Physical Trunk NIC: enp1s0                                                  |  |
+|  |                                                                             |  |
+|  |   ===============================================================           |  |
+|  |   |  🎯 TC ATTACHMENT POINT FOR OPERATOR                        |           |  |
+|  |   |                                                             |           |  |
+|  |   |  1. EGRESS (Root HTB Qdisc):                                |           |  |
+|  |   |     - Catches VLAN 100 tagged frames on enp1s0              |           |  |
+|  |   |     - Matches: protocol 802.1Q vlan_id 100                  |           |  |
+|  |   |     - Shape/Rate-Limit: Class 1:100                         |           |  |
+|  |   |                                                             |           |  |
+|  |   |  2. INGRESS (Ingress Qdisc ffff:):                          |           |  |
+|  |   |     - Catches incoming VLAN 100 tagged frames on enp1s0     |           |  |
+|  |   |     - Matches: protocol 802.1Q vlan_id 100                  |           |  |
+|  |   |     - Police Action: Rate-limit return flow                 |           |  |
+|  |   ===============================================================           |  |
+|  +-----------------------------------+-----------------------------------------+  |
++--------------------------------------|--------------------------------------------+
+                                       |
+                                       | 802.1Q Tagged Frame [VLAN 100]
+                                       v
+                     +-----------------------------------+
+                     | Physical Switch / External Router |
+                     | (10.0.100.1 Gateway)              |
+                     +-----------------------------------+
+```
+
+---
+
+### 5. Packet Flow & Tag Status
+
+#### Outbound Flow (VM ➔ Switch)
+
+```text
+  [1]  +----------------------------------------------------+
+       |  VM POD: test-vm-vlan100 (macvlan0 / eth1)         |
+       |  • Packet State: Raw Untagged IPv4 Payload         |
+       |  ------------------------------------------------  |
+       |  STATUS: [NO TAG] ❌                               |
+       +-------------------------+--------------------------+
+                                 |
+                                 v
+  [2]  +----------------------------------------------------+
+       |  MACVLAN SUB-INTERFACE: enp1s0.100                 |
+       |  • Driver injects 4-byte 802.1Q header             |
+       |  • Encapsulates payload with VLAN ID = 100         |
+       |  ------------------------------------------------  |
+       |  STATUS: [TAG PRESENT] 🏷️ (VID 100)                |
+       +-------------------------+--------------------------+
+                                 |
+                                 v
+  [3]  +----------------------------------------------------+
+       |  PHYSICAL TRUNK NIC: enp1s0                        |
+       |                                                    |
+       |  🎯 3a. TC EGRESS ENGINE (Root HTB Qdisc)          |
+       |      • Evaluates 802.1Q tagged frame               |
+       |      • Filter Match: protocol 802.1Q vlan_id 100   |
+       |      • Action: Rate-limit to Class 1:100           |
+       |  ------------------------------------------------  |
+       |  STATUS: [TAG PRESENT] 🏷️ (VID 100)                |
+       +-------------------------+--------------------------+
+                                 |
+                                 |  [Wire: 802.1Q Tagged Frame]
+                                 v
+  [4]  +----------------------------------------------------+
+       |  PHYSICAL SWITCH / GATEWAY (10.0.100.1)            |
+       |  ------------------------------------------------  |
+       |  STATUS: [TAG PRESENT] 🏷️ (VID 100)                |
+       +----------------------------------------------------+
+```
+
+#### Inbound Flow (Switch ➔ VM)
+
+```text
+  [4]  +----------------------------------------------------+
+       |  PHYSICAL SWITCH / GATEWAY (10.0.100.1)            |
+       |  ------------------------------------------------  |
+       |  STATUS: [TAG PRESENT] 🏷️ (VID 100)                |
+       +-------------------------+--------------------------+
+                                 |
+                                 |  [Wire: 802.1Q Tagged Frame]
+                                 v
+  [3]  +----------------------------------------------------+
+       |  PHYSICAL TRUNK NIC: enp1s0                        |
+       |                                                    |
+       |  🎯 3a. TC INGRESS ENGINE (ffff: Police Qdisc)     |
+       |      • Evaluates incoming 802.1Q tagged frame      |
+       |      • Filter Match: protocol 802.1Q vlan_id 100   |
+       |      • Action: Police return bandwidth (30Mbit)    |
+       |  ------------------------------------------------  |
+       |  STATUS: [TAG PRESENT] 🏷️ (VID 100)                |
+       +-------------------------+--------------------------+
+                                 |
+                                 v
+  [2]  +----------------------------------------------------+
+       |  MACVLAN SUB-INTERFACE: enp1s0.100                 |
+       |  • Strips 4-byte 802.1Q header (VID 100)           |
+       |  • Passes untagged payload up to MACVLAN slave     |
+       |  ------------------------------------------------  |
+       |  STATUS: [NO TAG] ❌                               |
+       +-------------------------+--------------------------+
+                                 |
+                                 v
+  [1]  +----------------------------------------------------+
+       |  VM POD: test-vm-vlan100 (macvlan0 / eth1)         |
+       |  • Receives plain ICMP reply / payload             |
+       |  ------------------------------------------------  |
+       |  STATUS: [NO TAG] ❌                               |
+       +----------------------------------------------------+
+```
+
+---
+
 

@@ -1,8 +1,8 @@
 ## Solution Overview & Technical Architecture
 
-**VLAN Traffic Control Operator** is an operator built to deliver fine-grained, declarative Quality of Service (QoS) and host-level network traffic shaping. 
+**VLAN Traffic Control Operator** delivers fine-grained, declarative Quality of Service (QoS) and host-level network traffic shaping for OpenShift/Kubernetes clusters.
 
-Standard Kubernetes bandwidth plugins are often limited to basic pod-level ingress/egress rate limiting and fail to address non-pod traffic, secondary Multus interfaces, Open vSwitch (OVS) bridges, or hardware-stripped VLAN tags. This operator bridges that gap by allowing cluster administrators to manage Linux Traffic Control (`tc`) queueing disciplines, classifiers, and rate limiters natively across worker nodes using standard OpenShift Custom Resources.
+Standard Kubernetes bandwidth CNI plugins are often limited to basic pod-level ingress/egress rate limiting and fail to address non-pod traffic, secondary Multus interfaces, Open vSwitch (OVS) bridges, or hardware-stripped VLAN tags. This operator bridges that gap by allowing cluster administrators to manage Linux Traffic Control (`tc`) queueing disciplines, classifiers, and rate limiters natively across worker nodes using standard OpenShift Custom Resources.
 
 ---
 
@@ -10,7 +10,6 @@ Standard Kubernetes bandwidth plugins are often limited to basic pod-level ingre
 
 The operator follows a dual-component architecture consisting of a cluster-wide **Controller Manager** and host-bound **Node Agents**:
 
-```
 +-----------------------------------------------------------------------------------+
 |                                 OpenShift Cluster                                 |
 |                                                                                   |
@@ -27,7 +26,7 @@ The operator follows a dual-component architecture consisting of a cluster-wide 
 |                     | Reconciles via API & triggers Agent HTTP endpoints          |
 |                     v                                                             |
 |  +-----------------------------------------------------------------------------+  |
-|  |                          Worker Node (DaemonSet)                            |  |
+|  |                           Worker Node (DaemonSet)                           |  |
 |  |                                                                             |  |
 |  |  +------------------------+        chroot /host     +--------------------+  |  |
 |  |  |   vlan-tc-agent Pod    | ----------------------> | Host OS Network    |  |  |
@@ -36,13 +35,12 @@ The operator follows a dual-component architecture consisting of a cluster-wide 
 |  |              |                                                |             |  |
 |  |              | Fetches /stats                                 | Configures  |  |
 |  |              v                                                v             |  |
-|  |       +--------------+                              +--------------------+  |  |
-|  |       | Structured   |                              | HTB Qdisc, Flower  |  |  |
-|  |       | JSON Metrics |                              | & Ingress Police   |  |  |
-|  |       +--------------+                              +--------------------+  |  |
+|  |       +--------------+                               +--------------------+  |  |
+|  |       | Structured   |                               | HTB Qdisc, Flower, |  |  |
+|  |       | JSON Metrics |                               | FW & Ingress Police|  |  |
+|  |       +--------------+                               +--------------------+  |  |
 |  +-----------------------------------------------------------------------------+  |
 +-----------------------------------------------------------------------------------+
-```
 
 #### 1. Controller Manager (`cmd/manager`)
 * Watches `VlanTrafficControl` Custom Resources cluster-wide.
@@ -52,7 +50,7 @@ The operator follows a dual-component architecture consisting of a cluster-wide 
 #### 2. Host Node Agent (`cmd/agent`)
 * Runs as a privileged `DaemonSet` across targeted worker nodes.
 * Executes in the host network namespace (`chroot /host`) to manipulate host network interfaces directly (`enp1s0`, `br-ex`, bond interfaces).
-* Verifies and auto-loads required Linux kernel modules (`sch_htb`, `cls_flower`, `act_police`).
+* Verifies and auto-loads required Linux kernel modules (`sch_htb`, `cls_flower`, `cls_fw`, `act_police`).
 * Exposes a structured REST API (`/stats`, `/reconcile`, `/cleanup`, `/healthz`) for health probes, manual triggers, and real-time packet/byte metric collection.
 
 ---
@@ -60,18 +58,18 @@ The operator follows a dual-component architecture consisting of a cluster-wide 
 ### Key Capabilities & Traffic Control Features
 
 #### Flexible Multi-Match Classification
-Traffic identification goes beyond standard 802.1Q VLAN tags. The operator supports four distinct classification strategies to handle complex container and virtual machine networking topologies:
+Traffic identification goes beyond standard 802.1Q VLAN tags. The operator supports three primary classification backends to handle complex container and virtual machine networking topologies:
 
-* **802.1Q VLAN Tag (`matchType: vlan`):** Direct matching on 802.1Q tagged frames traversing physical trunk interfaces or bond devices.
-* **IP Subnet / CIDR (`matchType: subnet`):** Essential for OpenShift Virtualization (KubeVirt) or OVS bridge interfaces where VLAN tags are stripped prior to hitting the host Linux stack. Matches on source IP (`src_ip`) for egress and destination IP (`dst_ip`) for ingress.
-* **Socket Buffer Mark (`matchType: mark`):** Matches on 32-bit `skbmark` values set upstream by Open vSwitch flows, `iptables`, or `nftables`.
-* **Auto-Detection (`matchType: auto`):** Dynamically inspects class attributes and automatically selects the optimal classification protocol.
+* **802.1Q VLAN Tag (`matchType: vlan`):** Uses `cls_flower` for direct matching on 802.1Q tagged frames traversing physical trunk interfaces or bond devices.
+* **IP Subnet / CIDR (`matchType: subnet`):** Uses `cls_flower` matching on source IP (`src_ip`) for egress and destination IP (`dst_ip`) for ingress. Ideal for OpenShift Virtualization (KubeVirt) or OVS bridge interfaces where VLAN tags are stripped prior to hitting the host Linux stack.
+* **Socket Buffer Mark (`matchType: mark`):** Uses `cls_fw` (`handle <mark> fw`) to match on 32-bit `skbmark` values set upstream by Open vSwitch flows, `iptables`, or `nftables`.
+* **Auto-Detection (`matchType: auto`):** Dynamically inspects class attributes and automatically selects the optimal classifier (`flower` or `fw`).
 
 #### Hierarchy Token Bucket (HTB) & Traffic Shaping
 * **Guaranteed Egress Bandwidth (`egressRate`):** Guarantees minimum outbound bandwidth allocation per traffic class under heavy contention.
 * **Burst Ceilings (`egressCeil`):** Limits maximum burst rate capacity when excess root interface bandwidth is available.
 * **Ingress Rate Policing (`ingressRate` & `ingressBurst`):** Enforces hard bandwidth caps on incoming interface traffic using kernel `act_police` drop filters on the `ingress` (`ffff:`) qdisc.
-* **Priority Queuing (`priority`):** Assigns HTB priority bands (0–7) to ensure latency-sensitive control traffic or storage networks pre-empt bulk data flows.
+* **Priority Queuing (`priority`):** Assigns HTB and filter priority bands (1–7) to ensure latency-sensitive control traffic or storage networks pre-empt bulk data flows.
 
 #### Active Queue Management (AQM)
 * **Bufferbloat Prevention (`enableFqCodel`):** Automatically attaches `fq_codel` (Fair Queueing Controlled Delay) leaf qdiscs beneath HTB classes to minimize queue latency and prevent TCP bufferbloat under maximum throughput conditions.
@@ -80,7 +78,7 @@ Traffic identification goes beyond standard 802.1Q VLAN tags. The operator suppo
 
 ### Target Use Cases
 
-* **Shared Interface & Live-Migration Protection:** On hyperconverged host interfaces shared across OpenShift control plane services, OpenStack/KubeVirt VM networks, and storage VLANs, high-burst operations like **VM live migrations** can saturate physical links and starve sensitive control traffic. By assigning strict priority bands (`priority: 0`) and rate ceilings, you ensure critical services like **ETCD heartbeat/consensus traffic** remain pre-empted and latency-protected during heavy virtual machine migrations.
+* **Shared Interface & Live-Migration Protection:** On hyperconverged host interfaces shared across OpenShift control plane services, OpenStack/KubeVirt VM networks, and storage VLANs, high-burst operations like **VM live migrations** can saturate physical links. By assigning strict priority bands (`priority: 1`) and rate ceilings, you ensure critical services like **ETCD heartbeat/consensus traffic** remain pre-empted and latency-protected.
 * **OpenShift Virtualization / KubeVirt:** Enforce strict egress and ingress bandwidth caps on virtual machine secondary interfaces (SR-IOV, Multus, or OVS bridge ports) to prevent individual tenant VMs from monopolizing node-level network capacity.
 * **Multi-Tenant Storage Isolation:** Prioritize latency-sensitive NVMe-oF, Ceph, or iSCSI storage traffic (e.g., VLAN 100/200) over standard pod egress traffic on shared 10G/25G/100G host NICs.
 * **Edge & Far-Edge Deployments:** Manage tight bandwidth constraints on resource-constrained edge nodes communicating over limited backhaul or satellite links by strictly queueing bulk data behind real-time applications.
@@ -97,7 +95,7 @@ The `VlanTrafficControl` Custom Resource (`networking.med.io/vlan-traffic-contro
 | :--- | :--- | :---: | :---: | :--- |
 | `nodeSelector` | `map[string]string` | No | `{}` | Map of node labels used to select target worker nodes (e.g., `node-role.kubernetes.io/worker: ""`). |
 | `reconcileIntervalSeconds` | `integer` | No | `30` | Interval in seconds between node agent reconciliation loops. |
-| `tcStrategy` | `string` | **Yes** | `"flower"` | Traffic control execution strategy. Valid values: `flower`, `u32`, `auto`. |
+| `tcStrategy` | `string` | **Yes** | `"flower"` | Default traffic control strategy execution mode. Valid values: `flower`, `u32`, `auto`. |
 | `htbRoot` | `HtbRootSpec` | **Yes** | — | Root HTB and interface configuration. |
 
 ### `HtbRootSpec` (`spec.htbRoot`)
@@ -124,19 +122,19 @@ The `VlanTrafficControl` Custom Resource (`networking.med.io/vlan-traffic-contro
 | `egressCeil` | `string` | No | `egressRate` | Maximum allowed outbound burst bandwidth ceiling (e.g., `200Mbit`, `10Gbit`). |
 | `egressBurst` | `string` | No | `"1250b"` | Outbound burst buffer size (e.g., `15k`, `30k`). |
 | `ingressRate` | `string` | No | `""` | Hard policing bandwidth cap for incoming interface traffic (e.g., `25Mbit`). |
-| `ingressBurst` | `string` | No | `""` | Incoming policing burst buffer size (e.g., `50k`). |
-| `priority` | `integer` | No | `0` | HTB priority level (0 = Highest Priority, 7 = Lowest Priority). |
+| `ingressBurst` | `string` | No | `"100k"` | Incoming policing burst buffer size (e.g., `50k`). |
+| `priority` | `integer` | No | `0` | HTB priority and TC filter priority level (1 = Highest Priority, 7 = Lowest Priority). |
 | `enableFqCodel` | `boolean` | No | `true` | Toggles attaching an `fq_codel` leaf qdisc to prevent bufferbloat under heavy load. |
 
 ### How `matchType: auto` Works
 
-When `matchType: auto` is used (or if `matchType` is left blank), the operator automatically infers the correct packet filtering method by inspecting which fields are defined in your class specification. 
+When `matchType: auto` is used (or if `matchType` is left blank), the operator automatically infers the correct classifier module (`flower` vs `fw`) and protocol by inspecting which fields are defined in your class specification.
 
 It evaluates your configuration using a top-down priority cascade:
 
-1. **802.1Q Tag (`vlanId > 0`):** If a `vlanId` is present, it configures an **L2 802.1Q VLAN tag filter** (`tc filter ... protocol 802.1Q flower vlan_id <vlanId>`).
-2. **IP Subnet (`subnet != ""`):** If no `vlanId` exists but a `subnet` CIDR is set, it configures an **L3 IP filter** (`tc filter ... protocol ip flower src_ip/dst_ip <subnet>`). This is ideal for OpenShift Virtualization (KubeVirt) VM bridged networks where VLAN tags are stripped prior to hitting the host interface.
-3. **SKB Mark (`mark > 0`):** If neither `vlanId` nor `subnet` is set, it matches on the **Socket Buffer mark** (`tc filter ... protocol all flower mark <mark>`) set upstream by OVS or firewall rules.
+1. **802.1Q Tag (`vlanId > 0`):** Configures a `cls_flower` **L2 802.1Q VLAN tag filter** (`tc filter ... protocol 802.1Q flower vlan_id <vlanId>`).
+2. **IP Subnet (`subnet != ""`):** Configures a `cls_flower` **L3 IP filter** (`tc filter ... protocol ip flower src_ip/dst_ip <subnet>`).
+3. **SKB Mark (`mark > 0`):** Configures a `cls_fw` **Firewall Mark filter** (`tc filter ... protocol all handle <mark> fw`).
 
 > **Note:** If `matchType: auto` is set but none of `vlanId`, `subnet`, or `mark` are defined, the agent safely logs a validation warning, skips filter creation for that specific class, and continues processing without crashing.
 
@@ -198,7 +196,7 @@ spec:
 
       # -----------------------------------------------------------------------
       # 3. Socket Buffer Mark Matching (matchType: mark)
-      # Matches traffic marked upstream by OVS, iptables, or nftables flows.
+      # Matches traffic marked upstream by OVS, iptables, or nftables flows via cls_fw.
       # -----------------------------------------------------------------------
       - name: "ovs-marked-flow"
         matchType: "mark"

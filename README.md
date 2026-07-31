@@ -444,7 +444,7 @@ The diagram below illustrates how `br-vlan100` switches traffic internally and w
 |                                      | [VM OUTBOUND / HOST INBOUND]               |
 |                                      v                                            |
 |  +-----------------------------------------------------------------------------+  |
-|  | LINUX BRIDGE: br-vlan100  [vlan_filtering=1]                               |  |
+|  | LINUX BRIDGE: br-vlan100  [vlan_filtering=1]                                |  |
 |  |                                                                             |  |
 |  |   +---------------------------------------------------------------------+   |  |
 |  |   | Port: veth1af88ce5 (VM Tap Port)                                    |   |  |

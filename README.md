@@ -602,7 +602,7 @@ Because `tc` evaluates packets on `enp1s0.100` before the driver attaches 802.1Q
 ---
 
 
-## MACVLAN Traffic Control & Architecture (VLAN Tag Matching)
+## MACVLAN (Sub-iface) Traffic Control & Architecture (VLAN Tag Matching)
 
 This section documents the Traffic Control (TC) configuration, Multus MACVLAN CNI setup, and kernel-level packet flow when using a MACVLAN interface where TC matches frames directly by **VLAN ID 100** (`matchType: vlan`).
 
@@ -819,4 +819,31 @@ class htb 1:100 parent 1:1 leaf 100: prio 1 rate 50Mbit ceil 10Gbit burst 15Kb c
 
 ---
 
+## MACVLAN (Physical) & Architecture (PENDING)
 
+---
+
+## Open vSwitch (OVS) / OVN-Kubernetes Integration & Architecture (PENDING)
+
+---
+
+## IPvLAN (L2 / L3 Mode) & Architecture (PENDING)
+
+---
+
+## SR-IOV (Single Root I/O Virtualization) & Architecture (HW REQUIRED)
+
+- HW reconfiguration required:
+
+   ~~~
+   [root@rbruzzon-platinum vlan-traffic-control-operator]# for iface in /sys/class/net/*; do
+    if [ -f "$iface/device/sriov_totalvfs" ]; then
+        echo "$(basename $iface) SUPPORTS SR-IOV! Max VFs: $(cat $iface/device/sriov_totalvfs)"
+    fi
+   done
+   
+   eno1 SUPPORTS SR-IOV! Max VFs: 32
+   eno2 SUPPORTS SR-IOV! Max VFs: 32
+   ~~~
+
+---

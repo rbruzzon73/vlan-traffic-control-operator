@@ -336,3 +336,266 @@ spec:
         ingressRate: "500Mbit"
         enableFqCodel: false
 ```
+
+
+
+# VLAN Traffic Control & Bridge Architecture
+
+This section describes the Traffic Control (TC) configuration, CNI setup, and kernel-level packet flow for managing VM traffic on **VLAN 100** via `br-vlan100` and the host sub-interface `enp1s0.100`.
+
+---
+
+## 1. Custom Resource Definition (CRD) Configuration
+
+Apply the `VlanTrafficControl` CRD to attach HTB egress shaping and ingress policing to the sub-interface `enp1s0.100`:
+
+```yaml
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: vlan-tc-vlan100
+spec:
+  htbRoot:
+    interface: enp1s0.100  # Target host sub-interface
+    rate: 10Gbit
+    defaultClassId: "1:99"
+    htbId: 1
+    classes:
+    - classId: "1:100"
+      name: storage-vlan-100
+      priority: 1
+      matchType: subnet
+      subnet: 10.0.100.0/24
+      egressRate: 50Mbit
+      egressCeil: 10Gbit
+      egressBurst: 15k
+      ingressRate: 30Mbit
+      ingressBurst: 50k
+      enableFqCodel: true
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  reconcileIntervalSeconds: 30
+  tcStrategy: flower
+```
+
+---
+
+## 2. Multus NetworkAttachmentDefinition (NAD)
+
+The VM connects its secondary interface (`eth1`) to the Linux bridge `br-vlan100` using the Multus Bridge CNI plugin:
+
+```yaml
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: storage-vlan100-nad
+  namespace: default   # Set to your VM's target namespace
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "name": "storage-vlan100-nad",
+      "type": "bridge",
+      "bridge": "br-vlan100",
+      "macspoofchk": false,
+      "vlan": 0
+    }
+```
+
+---
+
+## 3. Verification & Metrics Monitoring
+
+Check the active class counters on the host node using `oc debug` or direct host access:
+
+```bash
+# Query egress HTB class counters for class 1:100
+oc debug node/<worker-node> -- bash -c 'chroot /host tc -s class show dev enp1s0.100 classid 1:100'
+
+# Query ingress policing counters
+oc debug node/<worker-node> -- bash -c 'chroot /host tc -s filter show dev enp1s0.100 parent ffff:'
+```
+
+### Example Command Output
+
+```text
+class htb 1:100 parent 1:1 leaf 100: prio 1 rate 50Mbit ceil 10Gbit burst 15Kb cburst 0b
+ Sent 109326 bytes 1269 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+ lended: 1269 borrowed: 0 giants: 0
+ tokens: 38215 ctokens: 14
+```
+
+---
+
+## 4. Host Node Bridge Architecture
+
+The diagram below illustrates how `br-vlan100` switches traffic internally and where Traffic Control hooks into `enp1s0.100`:
+
+```text
++-----------------------------------------------------------------------------------+
+| HOST NODE (Linux Kernel)                                                          |
+|                                                                                   |
+|  +-----------------------------------------------------------------------------+  |
+|  | VM Pod (test-vm-vlan100)                                                    |  |
+|  |   Interface: eth1 (10.0.100.50)                                             |  |
+|  +-----------------------------------+-----------------------------------------+  |
+|                                      |                                            |
+|                                      | [VM OUTBOUND / HOST INBOUND]               |
+|                                      v                                            |
+|  +-----------------------------------------------------------------------------+  |
+|  | LINUX BRIDGE: br-vlan100  [vlan_filtering=1]                               |  |
+|  |                                                                             |  |
+|  |   +---------------------------------------------------------------------+   |  |
+|  |   | Port: veth1af88ce5 (VM Tap Port)                                    |   |  |
+|  |   |   - PVID 100 / Egress Untagged                                      |   |  |
+|  |   +----------------------------------+----------------------------------+   |  |
+|  |                                      |                                      |  |
+|  |                                      | (Kernel Bridge Direct L2 Forwarding) |  |
+|  |                                      | * Bypasses br-vlan100 Root Qdisc *   |  |
+|  |                                      v                                      |  |
+|  |   +---------------------------------------------------------------------+   |  |
+|  |   | Port / Device: enp1s0.100 (Host VLAN Sub-Interface)                 |   |  |
+|  |   |   - PVID 100 / Egress Untagged                                      |   |  |
+|  |   |                                                                     |   |  |
+|  |   |   ===============================================================   |   |  |
+|  |   |   |  🎯 TC ATTACHMENT POINT FOR OPERATOR                        |   |   |  |
+|  |   |   |                                                             |   |   |  |
+|  |   |   |  1. EGRESS (Root HTB Qdisc):                                |   |   |  |
+|  |   |   |     - Catches VM -> Physical Network traffic                |   |   |  |
+|  |   |   |     - Matches: protocol ip src_ip 10.0.100.0/24             |   |   |  |
+|  |   |   |     - Shape/Rate-Limit: Class 1:100                         |   |   |  |
+|  |   |   |                                                             |   |   |  |
+|  |   |   |  2. INGRESS (Ingress Qdisc ffff:):                          |   |   |  |
+|  |   |   |     - Catches Physical Network -> VM return traffic         |   |   |  |
+|  |   |   |     - Matches: protocol ip dst_ip 10.0.100.0/24             |   |   |  |
+|  |   |   |     - Police Action: Rate-limit return flow                 |   |   |  |
+|  |   |   ===============================================================   |   |  |
+|  |   +----------------------------------+----------------------------------+   |  |
+|  +--------------------------------------+--------------------------------------+  |
+|                                         |                                         |
+|                                         | Frame tagged with 802.1Q (VID 100)      |
+|                                         v                                         |
+|  +-----------------------------------------------------------------------------+  |
+|  | Physical NIC: enp1s0                                                        |  |
+|  +-----------------------------------+-----------------------------------------+  |
++--------------------------------------|--------------------------------------------+
+                                       |
+                                       | 802.1Q Tagged Frame [VLAN 100]
+                                       v
+                     +-----------------------------------+
+                     | Physical Switch / External Router |
+                     | (10.0.100.1 Gateway)              |
+                     +-----------------------------------+
+```
+
+---
+
+## 5. Packet Transformation & Tagging Flow
+
+Because `tc` evaluates packets on `enp1s0.100` before the driver attaches 802.1Q tags on egress (and after removing them on ingress), rules match **`protocol ip`** (`eth_type ipv4`) directly.
+
+### Outbound Flow (VM ➔ Switch)
+
+```text
+  [1]  +----------------------------------------------------+
+       |  VM POD: test-vm-vlan100 (eth1)                    |
+       |  • Packet State: Raw IPv4 Payload                  |
+       |  ------------------------------------------------  |
+       |  STATUS: [NO TAG] ❌                               |
+       +-------------------------+--------------------------+
+                                 |
+                                 v
+  [2]  +----------------------------------------------------+
+       |  BRIDGE INGRESS PORT: veth1af88ce5                 |
+       |  • PVID 100 sets internal kernel metadata flag     |
+       |  • No 802.1Q bytes inserted into frame             |
+       |  ------------------------------------------------  |
+       |  STATUS: [NO TAG] ❌                               |
+       +-------------------------+--------------------------+
+                                 |
+                                 |  [Bridge forwards packet internally]
+                                 v
+  [3]  +----------------------------------------------------+
+       |  BRIDGE PORT / SUB-INTERFACE: enp1s0.100           |
+       |                                                    |
+       |  🎯 3a. TC EGRESS ENGINE (Root HTB Qdisc)          |
+       |      • Evaluates raw IP payload                    |
+       |      • Filter Match: protocol ip src 10.0.100.0/24 |
+       |                                                    |
+       |  ------------------------------------------------  |
+       |  STATUS: [NO TAG] ❌                               |
+       +-------------------------+--------------------------+
+                                 |
+                                 |  [Packet handed down to sub-interface driver]
+                                 v
+  [4]  +----------------------------------------------------+
+       |  SUB-INTERFACE DRIVER & PHYSICAL NIC: enp1s0       |
+       |  • Driver injects 4-byte 802.1Q VLAN header        |
+       |  • VLAN ID = 100 inserted into packet bytes        |
+       |  ------------------------------------------------  |
+       |  STATUS: [TAG PRESENT] 🏷️ (VID 100)                |
+       +-------------------------+--------------------------+
+                                 |
+                                 |  [Wire: 802.1Q Tagged Frame]
+                                 v
+  [5]  +----------------------------------------------------+
+       |  PHYSICAL SWITCH / GATEWAY (10.0.100.1)            |
+       |  ------------------------------------------------  |
+       |  STATUS: [TAG PRESENT] 🏷️ (VID 100)                |
+       +----------------------------------------------------+
+```
+
+### Inbound Flow (Switch ➔ VM)
+
+```text
+  [5]  +----------------------------------------------------+
+       |  PHYSICAL SWITCH / GATEWAY (10.0.100.1)            |
+       |  ------------------------------------------------  |
+       |  STATUS: [TAG PRESENT] 🏷️ (VID 100)                |
+       +-------------------------+--------------------------+
+                                 |
+                                 |  [Wire: 802.1Q Tagged Frame]
+                                 v
+  [4]  +----------------------------------------------------+
+       |  PHYSICAL NIC: enp1s0                              |
+       |  • Receives tagged 802.1Q frame from physical wire |
+       |  ------------------------------------------------  |
+       |  STATUS: [TAG PRESENT] 🏷️ (VID 100)                |
+       +-------------------------+--------------------------+
+                                 |
+                                 v
+  [3]  +----------------------------------------------------+
+       |  SUB-INTERFACE DRIVER & SUB-INTERFACE: enp1s0.100  |
+       |                                                    |
+       |  🎯 3a. SUB-INTERFACE DRIVER                       |
+       |      • Strips the 4-byte 802.1Q VLAN header        |
+       |      • Hands raw IPv4 payload up to interface      |
+       |                                                    |
+       |  🎯 3b. TC INGRESS ENGINE (ffff: Police Qdisc)     |
+       |      • Evaluates packet AFTER tag removal          |
+       |      • Filter Match: protocol ip dst 10.0.100.0/24 |
+       |      • Action: Police return bandwidth (30Mbit)    |
+       |                                                    |
+       |  ------------------------------------------------  |
+       |  STATUS: [NO TAG] ❌                               |
+       +-------------------------+--------------------------+
+                                 |
+                                 |  [Bridge forwards untagged packet to VM port]
+                                 v
+  [2]  +----------------------------------------------------+
+       |  BRIDGE EGRESS PORT: veth1af88ce5                  |
+       |  • Egress Untagged rule passes plain IP to VM      |
+       |  ------------------------------------------------  |
+       |  STATUS: [NO TAG] ❌                               |
+       +-------------------------+--------------------------+
+                                 |
+                                 v
+  [1]  +----------------------------------------------------+
+       |  VM POD: test-vm-vlan100 (eth1)                    |
+       |  • Receives plain ICMP reply / payload             |
+       |  ------------------------------------------------  |
+       |  STATUS: [NO TAG] ❌                               |
+       +----------------------------------------------------+
+```
+

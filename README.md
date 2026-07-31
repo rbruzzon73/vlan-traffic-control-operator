@@ -36,10 +36,10 @@ The operator follows a dual-component architecture consisting of a cluster-wide 
 |  |              |                                                |             |  |
 |  |              | Fetches /stats                                 | Configures  |  |
 |  |              v                                                v             |  |
-|  |       +--------------+                               +--------------------+  |  |
-|  |       | Structured   |                               | HTB Qdisc, Flower, |  |  |
-|  |       | JSON Metrics |                               | FW & Ingress Police|  |  |
-|  |       +--------------+                               +--------------------+  |  |
+|  |       +--------------+                              +--------------------+  |  |
+|  |       | Structured   |                              | HTB Qdisc, Flower, |  |  |
+|  |       | JSON Metrics |                              | FW & Ingress Police|  |  |
+|  |       +--------------+                              +--------------------+  |  |
 |  +-----------------------------------------------------------------------------+  |
 +-----------------------------------------------------------------------------------+
 ```

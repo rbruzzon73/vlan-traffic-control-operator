@@ -13,3 +13,4 @@ cover.out
 .DS_Store
 .vscode/
 .idea/
+virtctl

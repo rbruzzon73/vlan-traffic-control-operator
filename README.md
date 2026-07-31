@@ -884,7 +884,7 @@ When bandwidth shaping or ingress policing fails to apply, follow this diagnosti
             |
             v
 +-------------------------------------------------------------+
-| 3. Direct Host Kernel Verification                           |
+| 3. Direct Host Kernel Verification                          |
 |    oc debug node/<node> -- chroot /host tc -s qdisc show ...|
 +-------------------------------------------------------------+
 ```

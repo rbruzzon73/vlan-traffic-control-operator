@@ -339,13 +339,13 @@ spec:
 
 
 
-# VLAN Traffic Control & Bridge Architecture
+## VLAN Traffic Control & Bridge Architecture
 
 This section describes the Traffic Control (TC) configuration, CNI setup, and kernel-level packet flow for managing VM traffic on **VLAN 100** via `br-vlan100` and the host sub-interface `enp1s0.100`.
 
 ---
 
-## 1. Custom Resource Definition (CRD) Configuration
+### 1. Custom Resource Definition (CRD) Configuration
 
 Apply the `VlanTrafficControl` CRD to attach HTB egress shaping and ingress policing to the sub-interface `enp1s0.100`:
 
@@ -380,7 +380,7 @@ spec:
 
 ---
 
-## 2. Multus NetworkAttachmentDefinition (NAD)
+### 2. Multus NetworkAttachmentDefinition (NAD)
 
 The VM connects its secondary interface (`eth1`) to the Linux bridge `br-vlan100` using the Multus Bridge CNI plugin:
 
@@ -404,7 +404,7 @@ spec:
 
 ---
 
-## 3. Verification & Metrics Monitoring
+### 3. Verification & Metrics Monitoring
 
 Check the active class counters on the host node using `oc debug` or direct host access:
 
@@ -416,7 +416,7 @@ oc debug node/<worker-node> -- bash -c 'chroot /host tc -s class show dev enp1s0
 oc debug node/<worker-node> -- bash -c 'chroot /host tc -s filter show dev enp1s0.100 parent ffff:'
 ```
 
-### Example Command Output
+#### Example Command Output
 
 ```text
 class htb 1:100 parent 1:1 leaf 100: prio 1 rate 50Mbit ceil 10Gbit burst 15Kb cburst 0b
@@ -428,7 +428,7 @@ class htb 1:100 parent 1:1 leaf 100: prio 1 rate 50Mbit ceil 10Gbit burst 15Kb c
 
 ---
 
-## 4. Host Node Bridge Architecture
+### 4. Host Node Bridge Architecture
 
 The diagram below illustrates how `br-vlan100` switches traffic internally and where Traffic Control hooks into `enp1s0.100`:
 
@@ -491,7 +491,7 @@ The diagram below illustrates how `br-vlan100` switches traffic internally and w
 
 ---
 
-## 5. Packet Transformation & Tagging Flow
+### 5. Packet Transformation & Tagging Flow
 
 Because `tc` evaluates packets on `enp1s0.100` before the driver attaches 802.1Q tags on egress (and after removing them on ingress), rules match **`protocol ip`** (`eth_type ipv4`) directly.
 
@@ -546,7 +546,7 @@ Because `tc` evaluates packets on `enp1s0.100` before the driver attaches 802.1Q
        +----------------------------------------------------+
 ```
 
-### Inbound Flow (Switch ➔ VM)
+#### Inbound Flow (Switch ➔ VM)
 
 ```text
   [5]  +----------------------------------------------------+

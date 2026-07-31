@@ -44,16 +44,126 @@ The operator follows a dual-component architecture consisting of a cluster-wide 
 +-----------------------------------------------------------------------------------+
 ```
 
-#### 1. Controller Manager (`cmd/manager`)
-* Watches `VlanTrafficControl` Custom Resources cluster-wide.
-* Filters target worker nodes using configurable `nodeSelector` rules.
-* Coordinates reconciliation loops across node agents and aggregates cluster-wide operational conditions into the resource `status`.
+### Component Architecture & Module Reference
+
+This document provides a detailed breakdown of every module and component comprising the **VLAN Traffic Control Operator**, outlining their scope, responsibilities, and operational behavior across the cluster and worker nodes.
+
+---
+
+#### 1. Controller Manager (`cmd/manager` & `internal/controller`)
+
+The Controller Manager is the central brain of the operator running at the cluster level. It acts as an orchestrator, handling resource lifecycle events and keeping cluster state aligned with Custom Resource definitions.
+
+* **Scope:** Cluster-wide control plane component.
+* **Responsibilities:**
+  * **CRD Watching:** Listens for `Create`, `Update`, and `Delete` events on `VlanTrafficControl` Custom Resources (`networking.med.io/v1alpha1`).
+  * **Node Targeting & Filtering:** Evaluates the `nodeSelector` block defined in the CRD to identify which worker nodes should receive traffic shaping policies.
+  * **Status Aggregation:** Collects health and reconciliation status from all node agents and updates the `.status` subresource of the `VlanTrafficControl` CR.
+  * **Agent Orchestration:** Calls the HTTP `/reconcile` or `/cleanup` REST endpoints on individual Node Agent pods to trigger immediate host-level updates whenever a CR is modified or deleted.
+* **Behavior:** Operates as a standard Kubernetes controller loop using `controller-runtime`. It does not execute direct `tc` commands on the host itself; instead, it delegates all host networking manipulations to the Node Agents.
+
+---
 
 #### 2. Host Node Agent (`cmd/agent`)
-* Runs as a privileged `DaemonSet` across targeted worker nodes.
-* Executes in the host network namespace (`chroot /host`) to manipulate host network interfaces directly (`enp1s0`, `br-ex`, bond interfaces).
-* Verifies and auto-loads required Linux kernel modules (`sch_htb`, `cls_flower`, `cls_fw`, `act_police`).
-* Exposes a structured REST API (`/stats`, `/reconcile`, `/cleanup`, `/healthz`) for health probes, manual triggers, and real-time packet/byte metric collection.
+
+The Host Node Agent is the execution engine running directly on every targeted worker node.
+
+* **Scope:** Host-bound DaemonSet pod running with host networking, privileged SCC permissions, and `/host` directory mounts.
+* **Responsibilities:**
+  * **Host Traffic Shaping:** Executes `tc` commands inside the host network namespace via `chroot /host` to configure `htb` qdiscs, classes, and filters (`cls_flower`, `cls_fw`, `act_police`).
+  * **Startup Self-Healing:** Performs an automatic startup reconciliation pass (`reconcileLocalTc`) when spawned, ensuring host network interfaces (`enp1s0`, `br-ex`, bonds) match the desired CR state immediately after a node reboot or agent restart.
+  * **REST API Server:** Exposes an internal HTTP server on port `8080` providing:
+    * `GET /stats`: Returns real-time byte/packet statistics and queue metrics.
+    * `POST /reconcile`: Triggers an instant local `tc` rule sync.
+    * `POST /cleanup` / `DELETE /cleanup`: Performs selective removal of rules managed by the operator without disturbing other host qdiscs.
+    * `GET /healthz`: Health check probe endpoint.
+* **Behavior:** Runs continuously on worker nodes. When triggered, it reads cluster CRDs via `client-go` and invokes `pkg/executor` to safely apply or update host rules using `tc class replace` and `tc filter replace`.
+
+---
+
+#### 3. Kernel Module Loader (`pkg/executor/modules.go`)
+
+This module ensures the Linux kernel running on the host node has all required Traffic Control modules loaded before attempting rule execution.
+
+* **Scope:** Internal package function invoked during agent boot.
+* **Responsibilities:**
+  * Checks for loaded kernel modules by reading host module paths via `/lib/modules`.
+  * Automatically executes `modprobe` inside the host namespace (`chroot /host modprobe <module>`) if a module is missing.
+* **Modules Verified:**
+  * `sch_htb`: Hierarchy Token Bucket queueing discipline.
+  * `cls_flower`: Advanced multi-field packet classifier.
+  * `cls_fw`: Firewall mark filter module for `skbmark` matching.
+  * `act_police`: Rate policing action module for ingress caps.
+  * `sch_fq_codel`: Fair Queueing Controlled Delay AQM leaf qdisc.
+* **Behavior:** Non-destructive and idempotent. If modules are already built into the kernel or loaded, it logs a debug entry and continues; if missing, it attempts to load them dynamically.
+
+---
+
+#### 4. TC Execution Engine (`pkg/executor/tc.go`)
+
+This is the core low-level execution package that builds and executes deterministic Linux `tc` command sequences.
+
+* **Scope:** Core Go package relied upon by `cmd/agent`.
+* **Responsibilities:**
+  * **Qdisc & Class Hierarchy Creation:**
+    * Ensures the egress root HTB qdisc (`handle 1:`) and parent class (`1:1`) exist on the target interface.
+    * Configures the default fallback class (`1:99`) with priority 0 for unclassified traffic.
+    * Ensures the ingress qdisc (`handle ffff:`) is present for rate policing.
+  * **Child Class Allocation:** Adds or replaces HTB classes (`1:100`, `1:280`, etc.) specifying `rate`, `ceil`, `burst`, and `prio`.
+  * **AQM Leaf Attachment:** Optionally attaches `fq_codel` leaf qdiscs under HTB classes when `enableFqCodel: true`.
+  * **Filter Generation & Execution:**
+    * `ApplyClassEgressFilter`: Constructs egress classification filters attached to parent `1:`. Uses explicit numeric filter handles (`handle <minor>`) to allow atomic replacement.
+    * `ApplyClassIngressPolice`: Constructs ingress policing drop rules attached to parent `ffff:` using kernel `act_police`.
+* **Behavior:** Translates structured Go CRD specs into atomic command arrays (e.g., `chroot /host tc filter replace dev enp1s0 ...`) and handles Linux kernel execution output.
+
+---
+
+#### 5. Classifier Resolver (`ResolveClassifier` in `pkg/executor/tc.go`)
+
+A dedicated decision-tree function responsible for selecting the correct Linux kernel classifier backend based on class criteria.
+
+* **Scope:** Internal utility function in `pkg/executor`.
+* **Responsibilities & Mapping:**
+  * **`matchType: vlan`** -> Returns `filterType: "flower"`, `protocol: "802.1Q"`, matching `vlan_id`.
+  * **`matchType: subnet`** -> Returns `filterType: "flower"`, `protocol: "ip"`, matching `src_ip` (egress) or `dst_ip` (ingress).
+  * **`matchType: mark`** -> Returns `filterType: "fw"`, `protocol: "all"`, matching `handle <mark> fw`.
+  * **`matchType: auto`** -> Evaluates specs top-down:
+    1. If `vlanId > 0` -> Selects `vlan` (`cls_flower`).
+    2. Else if `subnet != ""` -> Selects `subnet` (`cls_flower`).
+    3. Else if `mark > 0` -> Selects `mark` (`cls_fw`).
+* **Behavior:** Pure, side-effect-free evaluation logic that returns exact parameter strings and execution flags to the caller.
+
+---
+
+#### 6. Statistics Collector (`pkg/executor/htb_executor.go`)
+
+This component queries the Linux kernel to retrieve real-time traffic shaping metrics for monitoring and API exposure.
+
+* **Scope:** Internal package invoked by the agent `/stats` HTTP endpoint.
+* **Responsibilities:**
+  * Executes `tc -s class show dev <iface>` and `tc -s filter show dev <iface> ingress` via `chroot /host`.
+  * Parses raw `tc` text outputs (bytes sent, packet counts, drops, rate overlimits, tokens, queue backlog) into structured Go structs and JSON objects.
+* **Behavior:** Read-only operation that provides high-frequency visibility into queue utilization and rate limit enforcement across nodes.
+
+---
+
+## Component Interaction Summary
+
+```text
+[ VlanTrafficControl CR ]
+           │
+           ▼
+[ Controller Manager (cmd/manager) ] ── (Watches CRDs & Calls HTTP API) ──┐
+                                                                          │
+┌─────────────────────────────────────────────────────────────────────────┘
+│
+▼
+[ Host Node Agent (cmd/agent) ]
+  ├── 1. Modules Loader (pkg/executor/modules.go) ──> Loads sch_htb, cls_flower, cls_fw
+  ├── 2. Classifier Resolver (ResolveClassifier)  ──> Maps vlan/subnet/mark criteria
+  ├── 3. TC Engine (pkg/executor/tc.go)           ──> Executes chroot /host tc commands
+  └── 4. Stats Collector (htb_executor.go)         ──> Exposes /stats JSON metrics
+  ```
 
 ---
 

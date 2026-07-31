@@ -10,6 +10,7 @@ Standard Kubernetes bandwidth CNI plugins are often limited to basic pod-level i
 
 The operator follows a dual-component architecture consisting of a cluster-wide **Controller Manager** and host-bound **Node Agents**:
 
+```text
 +-----------------------------------------------------------------------------------+
 |                                 OpenShift Cluster                                 |
 |                                                                                   |
@@ -41,6 +42,7 @@ The operator follows a dual-component architecture consisting of a cluster-wide 
 |  |       +--------------+                               +--------------------+  |  |
 |  +-----------------------------------------------------------------------------+  |
 +-----------------------------------------------------------------------------------+
+```
 
 #### 1. Controller Manager (`cmd/manager`)
 * Watches `VlanTrafficControl` Custom Resources cluster-wide.
@@ -223,3 +225,4 @@ spec:
         egressCeil: "2Gbit"
         ingressRate: "500Mbit"
         enableFqCodel: false
+```

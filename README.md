@@ -847,3 +847,111 @@ class htb 1:100 parent 1:1 leaf 100: prio 1 rate 50Mbit ceil 10Gbit burst 15Kb c
    ~~~
 
 ---
+
+## OpenShift Cluster Metrics & Ingress Filter Observability (PENDING)
+
+This section details how the `vlan-traffic-control-agent` DaemonSet collects real-time Traffic Control (TC) telemetry across all OpenShift worker nodes, exposes structured egress and ingress bandwidth metrics, and maps kernel netlink filter stats directly back to `VlanTrafficControl` Custom Resources.
+
+---
+
+## Troubleshooting & Error Code Analysis
+
+This section provides diagnostic procedures, common error code resolutions, and step-by-step troubleshooting workflows for the `VlanTrafficControl` operator, agent DaemonSet, and host-level Traffic Control (TC) subsystem.
+
+---
+
+### 1. Diagnostics Flowchart
+
+When bandwidth shaping or ingress policing fails to apply, follow this diagnostic progression:
+
+```text
++-------------------------------------------------------------+
+| 1. Check Custom Resource Status                             |
+|    oc get vlantrafficcontrol -o yaml                        |
++------------------------------+------------------------------+
+                               |
+            +------------------+------------------+
+            |                                     |
+            v                                     v
+   [ Status: Ready ]                     [ Status: Degraded/Failed ]
+            |                                     |
+            v                                     v
++-----------------------+             +-----------------------+
+| 2. Inspect Node Agent |             | Read Condition Message|
+|    oc logs -n ...     |             | Check Netlink Error   |
+|    -l app=agent       |             | (See Table Below)     |
++-----------+-----------+             +-----------------------+
+            |
+            v
++-------------------------------------------------------------+
+| 3. Direct Host Kernel Verification                           |
+|    oc debug node/<node> -- chroot /host tc -s qdisc show ...|
++-------------------------------------------------------------+
+```
+
+---
+
+### 2. Common TC Netlink & Kernel Error Codes
+
+When the `vlan-traffic-control-agent` attempts to program HTB qdiscs or `tc-flower` filters via netlink sockets, kernel errors return standard Linux `errno` codes.
+
+| Error Code | Kernel Symbol | Root Cause | Resolution Strategy |
+| :--- | :--- | :--- | :--- |
+| **`exit status 2` / `ENOENT`** | `No such file or directory` | Target network interface (e.g., `enp1s0.100`) does not exist on the node. | Verify that NMState or NetworkManager has created the VLAN sub-interface before applying the CRD. |
+| **`EEXIST` (-17)** | `File exists` | Attempting to create an HTB root qdisc (`1:`) or filter handle that is already bound to the interface. | The operator must perform an idempotent `replace` operation (`RTM_NEWQDISC` with `NLM_F_REPLACE`) instead of `create`. |
+| **`EINVAL` (-22)** | `Invalid argument` | Invalid TC parameter combination (e.g., `rate` exceeds physical link maximum, or misconfigured quantum/burst). | Validate CR values. Ensure `egressBurst` is non-zero and `htbRoot.rate` is a valid `tc` unit string (`Mbit`, `Gbit`). |
+| **`ENOMEM` (-12)** | `Cannot allocate memory` | PCIe MMIO memory BAR allocation failed when attempting to spawn SR-IOV Virtual Functions. | Add `pci=realloc` and `intel_iommu=on` to the host GRUB parameters and reboot the host node. |
+| **`EOPNOTSUPP` (-95)**| `Operation not supported` | Hardware offload (`tcStrategy: flower` with `hw_offload`) requested on a NIC driver without switchdev support. | Set `tcStrategy` to software mode or verify SmartNIC driver capabilities (`ethtool -k <iface> \| grep hw-tc-offload`). |
+| **`EBUSY` (-16)** | `Device or resource busy` | Attempting to delete a root HTB qdisc while secondary class queues are active or locked by another CNI. | Flush filters (`tc filter del ...`) before deleting parent class IDs (`tc class del ...`). |
+
+---
+
+### 3. Common Failure Scenarios & Troubleshooting Steps
+
+#### Scenario A: Ingress Metrics Show 0 Bytes / Zero Packets
+
+* **Symptom:** Egress metrics update correctly in `/stats`, but `ingressStats` counters remain at `0`.
+* **Root Cause:** Ingress filters applied to a VLAN sub-interface (`enp1s0.100`) are incorrectly matching `protocol 802.1Q vlan_id 100` instead of `protocol ip`.
+* **Verification:**
+  ```bash
+  oc debug node/<worker-node> -- bash -c 'chroot /host tc -s filter show dev enp1s0.100 parent ffff:'
+  ```
+* **Fix:** Because the kernel VLAN driver strips 802.1Q tags before hitting the sub-interface ingress qdisc, update the ingress rule to match plain IP (`matchType: subnet` / `protocol ip`).
+
+---
+
+#### Scenario B: Ingress Filters Unidentifiable in API (`filterId: "ffff:"`)
+
+* **Symptom:** `/stats` output returns duplicate `filterId: "ffff:"` strings without mapping back to CRD classes.
+* **Root Cause:** The agent reads the qdisc parent ID (`ffff:`) instead of parsing the netlink filter cookie or preference ID (`pref`).
+* **Fix:** Ensure the operator attaches a unique netlink cookie (`TCA_COOKIE`) corresponding to the `classId` (e.g., `1:100`) when creating the filter rule.
+
+---
+
+#### Scenario C: Traffic Bypassing HTB Shaper on Linux Bridge
+
+* **Symptom:** VM egress bandwidth exceeds the configured `egressRate` limit.
+* **Root Cause:** TC root qdisc is attached to `br-vlan100` instead of `enp1s0.100`. Linux bridge internal L2 switching bypasses the bridge interface root qdisc.
+* **Verification:** Check where the root HTB qdisc is attached:
+  ```bash
+  oc debug node/<worker-node> -- bash -c 'chroot /host tc qdisc show dev br-vlan100'
+  ```
+* **Fix:** Update `VlanTrafficControl` spec to target the egress port device (`interface: enp1s0.100`).
+
+---
+
+### 4. Useful Debug Commands Reference
+
+```bash
+# 1. View active HTB class hierarchy and operational rates
+oc debug node/<node> -- bash -c 'chroot /host tc -s class show dev enp1s0.100'
+
+# 2. View all ingress policing filters and packet drop counters
+oc debug node/<node> -- bash -c 'chroot /host tc -s filter show dev enp1s0.100 parent ffff:'
+
+# 3. Stream real-time netlink TC events from kernel
+oc debug node/<node> -- bash -c 'chroot /host tc monitor'
+
+# 4. Check operator agent logs for netlink reconciliation errors
+oc logs -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent --tail=100
+```

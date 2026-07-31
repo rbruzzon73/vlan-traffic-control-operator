@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
-	"strings"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
@@ -103,7 +101,7 @@ func main() {
 		})
 	})
 
-	// 5. HTTP /cleanup Handler (Selective Rule Wipe)
+	// 5. HTTP /cleanup Handler (Full Root & Ingress Qdisc Wipe)
 	http.HandleFunc("/cleanup", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete && r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -116,25 +114,23 @@ func main() {
 		}
 
 		log.Info("========================================================================")
-		log.Info("[CLEANUP] Starting selective TC rule cleanup...", "interface", iface, "triggeredBy", r.RemoteAddr)
+		log.Info("[CLEANUP] Starting host TC rule cleanup...", "interface", iface, "triggeredBy", r.RemoteAddr)
 
-		cleanedClasses, cleanedFilters := performSelectiveCleanup(k8sClient, iface, log)
-
-		log.Info("[CLEANUP] Selective cleanup complete",
-			"interface", iface,
-			"classesRemoved", cleanedClasses,
-			"filtersRemoved", cleanedFilters,
-		)
+		// Deletes root HTB qdisc and ingress policing qdisc via FlushInterface
+		errCleanup := executor.FlushInterface(iface)
+		if errCleanup != nil {
+			log.Error(errCleanup, "[CLEANUP] Error during interface flush", "interface", iface)
+		} else {
+			log.Info("[CLEANUP] Interface successfully flushed (root & ingress qdiscs removed)", "interface", iface)
+		}
 		log.Info("========================================================================")
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":           "selective_cleanup_completed",
-			"node":             nodeName,
-			"interface":        iface,
-			"classesRemoved": cleanedClasses,
-			"filtersRemoved": cleanedFilters,
+			"status":    "cleanup_completed",
+			"node":      nodeName,
+			"interface": iface,
 		})
 	})
 
@@ -190,76 +186,4 @@ func reconcileLocalTc(k8sClient client.Client, log logr.Logger) {
 		}
 		log.Info("----------------------------------------------------------------")
 	}
-}
-
-// performSelectiveCleanup removes ONLY the specific classes and ingress/egress filters defined by the operator
-func performSelectiveCleanup(k8sClient client.Client, iface string, log logr.Logger) (int, int) {
-	ctx := context.Background()
-	var list networkingv1alpha1.VlanTrafficControlList
-	classesRemoved := 0
-	filtersRemoved := 0
-
-	if err := k8sClient.List(ctx, &list); err != nil {
-		log.Error(err, "[CLEANUP] Failed to fetch CRD list for selective wipe")
-		return 0, 0
-	}
-
-	for _, crd := range list.Items {
-		if crd.Spec.HtbRoot.Interface != iface && iface != "all" {
-			continue
-		}
-
-		targetIface := crd.Spec.HtbRoot.Interface
-		rootHandle := crd.Spec.HtbRoot.HtbID
-		if rootHandle <= 0 {
-			rootHandle = 1
-		}
-
-		filterParentStr := fmt.Sprintf("%d:", rootHandle)
-
-		for _, cls := range crd.Spec.HtbRoot.Classes {
-			classHandle := fmt.Sprintf("%d:%d", rootHandle, cls.ClassMinor)
-
-			proto, _, desc, errRes := executor.ResolveClassifier(cls, rootHandle)
-			if errRes != nil {
-				log.Info("[SELECTIVE-CLEANUP] Skipping filter delete due to invalid classifier", "classHandle", classHandle, "reason", errRes.Error())
-			} else {
-				// 1. Remove Egress Filter for this specific class
-				cmdDelFilterEgress := []string{"chroot", "/host", "tc", "filter", "del", "dev", targetIface, "parent", filterParentStr, "protocol", proto}
-				outFilter, errFilter := exec.Command(cmdDelFilterEgress[0], cmdDelFilterEgress[1:]...).CombinedOutput()
-				if errFilter == nil {
-					filtersRemoved++
-					log.Info("[SELECTIVE-CLEANUP] Removed egress filter", "interface", targetIface, "strategy", desc, "targetClass", classHandle)
-				} else {
-					log.Info("[SELECTIVE-CLEANUP] Egress filter note", "interface", targetIface, "strategy", desc, "details", strings.TrimSpace(string(outFilter)))
-				}
-
-				// 2. Remove Ingress Policing Filter for this specific class
-				if cls.IngressRate != "" {
-					cmdDelFilterIngress := []string{"chroot", "/host", "tc", "filter", "del", "dev", targetIface, "parent", "ffff:", "protocol", proto}
-					outIngress, errIngress := exec.Command(cmdDelFilterIngress[0], cmdDelFilterIngress[1:]...).CombinedOutput()
-					if errIngress == nil {
-						filtersRemoved++
-						log.Info("[SELECTIVE-CLEANUP] Removed ingress policing filter", "interface", targetIface, "strategy", desc)
-					} else {
-						log.Info("[SELECTIVE-CLEANUP] Ingress filter note", "interface", targetIface, "strategy", desc, "details", strings.TrimSpace(string(outIngress)))
-					}
-				}
-			}
-
-			// 3. Selectively Delete HTB Class
-			if classHandle != "" {
-				cmdDelClass := []string{"chroot", "/host", "tc", "class", "del", "dev", targetIface, "parent", fmt.Sprintf("%d:1", rootHandle), "classid", classHandle}
-				outClass, errClass := exec.Command(cmdDelClass[0], cmdDelClass[1:]...).CombinedOutput()
-				if errClass == nil {
-					classesRemoved++
-					log.Info("[SELECTIVE-CLEANUP] Successfully deleted target HTB class", "interface", targetIface, "classHandle", classHandle)
-				} else {
-					log.Info("[SELECTIVE-CLEANUP] Class removal result", "interface", targetIface, "classHandle", classHandle, "output", strings.TrimSpace(string(outClass)))
-				}
-			}
-		}
-	}
-
-	return classesRemoved, filtersRemoved
 }

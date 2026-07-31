@@ -16,7 +16,7 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 
 	iface := spec.Interface
 
-	// 1. Flush existing root qdisc
+	// 1. Flush existing root and ingress qdiscs prior to setup
 	_ = FlushInterface(iface)
 
 	// Resolve Root Handle (e.g., 1 for handle 1:)
@@ -94,7 +94,7 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 		}
 
 		// C. Dynamic Egress Classification Filter (VLAN, Subnet, Mark, or Auto)
-		proto, matchArgs, desc, err := ResolveClassifier(c, rootHandle)
+		_, proto, matchArgs, desc, err := ResolveClassifier(c, rootHandle)
 		if err != nil {
 			log.Info("[HTB] Warning: Skipping filter generation", "classHandle", classHandle, "reason", err.Error())
 			continue
@@ -117,10 +117,16 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 	return nil
 }
 
-// FlushInterface deletes root qdiscs from interface
+// FlushInterface deletes root and ingress qdiscs from interface to wipe all TC rules
 func FlushInterface(iface string) error {
-	cmd := execHostCommand("tc", "qdisc", "del", "dev", iface, "root")
-	_ = cmd.Run()
+	// 1. Delete root HTB qdisc (wipes all egress classes and egress filters)
+	cmdRoot := execHostCommand("tc", "qdisc", "del", "dev", iface, "root")
+	_ = cmdRoot.Run()
+
+	// 2. Delete ingress qdisc (wipes all ingress policing filters)
+	cmdIngress := execHostCommand("tc", "qdisc", "del", "dev", iface, "ingress")
+	_ = cmdIngress.Run()
+
 	return nil
 }
 

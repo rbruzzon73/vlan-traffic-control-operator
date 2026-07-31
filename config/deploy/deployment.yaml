@@ -15,11 +15,13 @@ spec:
       labels:
         control-plane: controller-manager
     spec:
+      serviceAccountName: vlan-traffic-control-manager
       containers:
       - name: manager
-        image: ghcr.io/rbruzzon73/vlan-traffic-control-manager:v0.2.0
+        image: ghcr.io/rbruzzon73/vlan-traffic-control-operator:v0.2.41
         command:
         - /manager
+        imagePullPolicy: Always
         resources:
           limits:
             cpu: 500m

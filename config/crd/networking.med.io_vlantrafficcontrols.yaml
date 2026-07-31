@@ -50,10 +50,14 @@ spec:
                       description: VlanClassSpec defines rules for a single traffic
                         class (VLAN, Subnet, or SKB Mark).
                       properties:
+                        classId:
+                          description: Unique HTB class identifier (e.g., "1:10",
+                            "1:100"). [OPTIONAL]
+                          pattern: ^1:[0-9]+$
+                          type: string
                         classMinor:
-                          description: |-
-                            HTB minor class identifier (e.g., 10 for handle X:10).
-                            Combined automatically with htbRoot.htbId to build the full TC class handle. [REQUIRED]
+                          description: HTB minor class identifier (e.g., 10 for handle
+                            X:10). [OPTIONAL]
                           maximum: 65535
                           minimum: 1
                           type: integer
@@ -105,7 +109,7 @@ spec:
                             - "vlan": Matches 802.1Q tagged traffic using vlanId (Range: 1-4094).
                             - "subnet": Matches untagged/stripped traffic based on IP network CIDR using subnet.
                             - "mark": Matches packets marked by OVS or iptables using mark (skbmark).
-                            - "auto" (default): Automatically selects "vlan" if vlanId is set, "subnet" if subnet is set, or "mark" if mark is set. [OPTIONAL]
+                            - "auto" (default): Automatically selects classification based on defined fields. [OPTIONAL]
                           type: string
                         name:
                           description: Descriptive name for this traffic class. [OPTIONAL]
@@ -119,7 +123,7 @@ spec:
                           type: integer
                         subnet:
                           description: Subnet (CIDR) to match untagged or stripped
-                            traffic (e.g., "10.100.0.0/24"). Required if matchType
+                            traffic (e.g., "10.200.0.0/24"). Required if matchType
                             is "subnet". [OPTIONAL]
                           type: string
                         vlanId:
@@ -129,10 +133,14 @@ spec:
                           minimum: 1
                           type: integer
                       required:
-                      - classMinor
                       - egressRate
                       type: object
                     type: array
+                  defaultClassId:
+                    default: 1:99
+                    description: Default class ID where unclassified traffic is routed
+                      (e.g., "1:99"). [OPTIONAL]
+                    type: string
                   defaultClassMinor:
                     default: 99
                     description: Default class minor ID where unclassified traffic
@@ -140,8 +148,8 @@ spec:
                     type: integer
                   htbId:
                     default: 1
-                    description: Custom HTB root handle ID (e.g., 1 for handle 1:0,
-                      2 for handle 2:0). [OPTIONAL]
+                    description: Custom HTB root handle ID (e.g., 1 for handle 1:0).
+                      [OPTIONAL]
                     type: integer
                   interface:
                     description: Target physical, bond, or bridge network interface

@@ -1,0 +1,65 @@
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: vlan-tc-workers
+spec:
+  htbRoot:
+    interface: enp1s0
+    rate: 10Gbit
+    htbId: 1
+    defaultClassId: "1:99"
+    classes:
+
+      # VlanTrafficControl - Matches Untagged IP Traffic for VLAN 100 Subnet
+      - classId: "1:100"
+        name: storage-vlan-100
+        matchType: subnet
+        subnet: 10.0.100.0/24
+        priority: 1
+        ingressRate: 30Mbit
+        ingressBurst: 50k
+        egressRate: 50Mbit
+        egressCeil: 10Gbit
+        egressBurst: 15k
+        enableFqCodel: true
+
+      # 2. Matches Subnet 10.0.100.0/24 (Matches untagged/routed packets on VLAN 100)
+      - classId: "1:280"
+        name: kubevirt-vlan100-subnet
+        matchType: subnet
+        subnet: 10.0.100.0/24
+        priority: 2
+        ingressRate: 200Mbit
+        ingressBurst: 30k
+        egressRate: 200Mbit
+        egressCeil: 200Mbit
+        egressBurst: 30k
+        enableFqCodel: true
+
+      # 3. OVS SKB Mark (for OpenShift OVN-Kubernetes marked flows)
+      - classId: "1:380"
+        name: ovs-marked-flow
+        matchType: mark
+        mark: 16
+        priority: 3
+        ingressRate: 100Mbit
+        ingressBurst: 20k
+        egressRate: 500Mbit
+        egressCeil: 500Mbit
+        egressBurst: 50k
+        enableFqCodel: true
+
+      # 4. Fallback / Raw HTB test class
+      - classId: "1:400"
+        name: raw-htb-no-fqcodel
+        matchType: auto
+        vlanId: 400
+        priority: 4
+        ingressRate: 500Mbit
+        egressRate: 1Gbit
+        egressCeil: 2Gbit
+        enableFqCodel: false
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  reconcileIntervalSeconds: 30
+  tcStrategy: flower

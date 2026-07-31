@@ -1,0 +1,26 @@
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: vlan-tc-vlan100
+spec:
+  htbRoot:
+    interface: enp1s0.100   # <--- Updated target interface
+    rate: 10Gbit
+    defaultClassId: "1:99"
+    htbId: 1
+    classes:
+    - classId: "1:100"
+      name: storage-vlan-100
+      priority: 1
+      matchType: subnet
+      subnet: 10.0.100.0/24
+      egressRate: 50Mbit
+      egressCeil: 10Gbit
+      egressBurst: 15k
+      ingressRate: 30Mbit
+      ingressBurst: 50k
+      enableFqCodel: true
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  reconcileIntervalSeconds: 30
+  tcStrategy: flower

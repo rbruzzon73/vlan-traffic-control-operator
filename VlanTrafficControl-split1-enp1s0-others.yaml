@@ -1,0 +1,35 @@
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: vlan-tc-workers
+spec:
+  htbRoot:
+    interface: enp1s0
+    rate: 10Gbit
+    defaultClassId: "1:99"
+    htbId: 1
+    classes:
+    - classId: "1:380"
+      name: ovs-marked-flow
+      priority: 3
+      matchType: mark
+      mark: 16
+      egressRate: 500Mbit
+      egressCeil: 500Mbit
+      egressBurst: 50k
+      ingressRate: 100Mbit
+      ingressBurst: 20k
+      enableFqCodel: true
+    - classId: "1:400"
+      name: raw-htb-no-fqcodel
+      priority: 4
+      matchType: auto
+      vlanId: 400
+      egressRate: 1Gbit
+      egressCeil: 2Gbit
+      ingressRate: 500Mbit
+      enableFqCodel: false
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  reconcileIntervalSeconds: 30
+  tcStrategy: flower

@@ -1,6 +1,10 @@
 package v1alpha1
 
 import (
+	"fmt"
+	"strconv"
+	"strings"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -32,18 +36,22 @@ type VlanClassSpec struct {
 	// +optional
 	Name string `json:"name,omitempty"`
 
-	// HTB minor class identifier (e.g., 10 for handle X:10). 
-	// Combined automatically with htbRoot.htbId to build the full TC class handle. [REQUIRED]
-	// +kubebuilder:validation:Required
+	// HTB minor class identifier (e.g., 10 for handle X:10). [OPTIONAL]
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
-	ClassMinor int `json:"classMinor"`
+	// +optional
+	ClassMinor int `json:"classMinor,omitempty"`
+
+	// Unique HTB class identifier (e.g., "1:10", "1:100"). [OPTIONAL]
+	// +kubebuilder:validation:Pattern=`^1:[0-9]+$`
+	// +optional
+	ClassID string `json:"classId,omitempty"`
 
 	// MatchType explicitly selects the classification strategy:
 	// - "vlan": Matches 802.1Q tagged traffic using vlanId (Range: 1-4094).
 	// - "subnet": Matches untagged/stripped traffic based on IP network CIDR using subnet.
 	// - "mark": Matches packets marked by OVS or iptables using mark (skbmark).
-	// - "auto" (default): Automatically selects "vlan" if vlanId is set, "subnet" if subnet is set, or "mark" if mark is set. [OPTIONAL]
+	// - "auto" (default): Automatically selects classification based on defined fields. [OPTIONAL]
 	// +kubebuilder:default=auto
 	// +kubebuilder:validation:Enum=vlan;subnet;mark;auto
 	// +optional
@@ -55,7 +63,7 @@ type VlanClassSpec struct {
 	// +optional
 	VlanID int `json:"vlanId,omitempty"`
 
-	// Subnet (CIDR) to match untagged or stripped traffic (e.g., "10.100.0.0/24"). Required if matchType is "subnet". [OPTIONAL]
+	// Subnet (CIDR) to match untagged or stripped traffic (e.g., "10.200.0.0/24"). Required if matchType is "subnet". [OPTIONAL]
 	// +optional
 	Subnet string `json:"subnet,omitempty"`
 
@@ -96,25 +104,48 @@ type VlanClassSpec struct {
 	EnableFqCodel bool `json:"enableFqCodel"`
 }
 
+// GetClassMinor returns the integer minor class ID, parsing ClassID ("1:10") if ClassMinor isn't directly specified.
+func (c *VlanClassSpec) GetClassMinor() int {
+	if c.ClassMinor > 0 {
+		return c.ClassMinor
+	}
+	if c.ClassID != "" {
+		parts := strings.Split(c.ClassID, ":")
+		if len(parts) == 2 {
+			if val, err := strconv.Atoi(parts[1]); err == nil {
+				return val
+			}
+		}
+	}
+	return 0
+}
+
+// GetClassID returns the formatted class ID string (e.g., "1:10").
+func (c *VlanClassSpec) GetClassID(rootHtbID int) string {
+	if c.ClassID != "" {
+		return c.ClassID
+	}
+	if rootHtbID <= 0 {
+		rootHtbID = 1
+	}
+	return fmt.Sprintf("%d:%d", rootHtbID, c.GetClassMinor())
+}
+
 // HtbClassSpec defines HTB class execution parameters used internally by executor engines.
 type HtbClassSpec struct {
-	// Unique HTB class identifier (e.g., "1:10").
-	ClassID string `json:"classId"`
-
-	// Classification criteria
-	VlanID int            `json:"vlanId,omitempty"`
-	Subnet string         `json:"subnet,omitempty"`
-	Mark   uint32         `json:"mark,omitempty"`
-	Match  ClassifierType `json:"matchType,omitempty"`
-
-	// QoS configuration parameters
-	Priority      int    `json:"priority,omitempty"`
-	EgressRate    string `json:"egressRate,omitempty"`
-	EgressCeil    string `json:"egressCeil,omitempty"`
-	EgressBurst   string `json:"egressBurst,omitempty"`
-	IngressRate   string `json:"ingressRate,omitempty"`
-	IngressBurst  string `json:"ingressBurst,omitempty"`
-	EnableFqCodel bool   `json:"enableFqCodel,omitempty"`
+	ClassID       string         `json:"classId"`
+	ClassMinor    int            `json:"classMinor,omitempty"`
+	VlanID        int            `json:"vlanId,omitempty"`
+	Subnet        string         `json:"subnet,omitempty"`
+	Mark          uint32         `json:"mark,omitempty"`
+	Match         ClassifierType `json:"matchType,omitempty"`
+	Priority      int            `json:"priority,omitempty"`
+	EgressRate    string         `json:"egressRate,omitempty"`
+	EgressCeil    string         `json:"egressCeil,omitempty"`
+	EgressBurst   string         `json:"egressBurst,omitempty"`
+	IngressRate   string         `json:"ingressRate,omitempty"`
+	IngressBurst  string         `json:"ingressBurst,omitempty"`
+	EnableFqCodel bool           `json:"enableFqCodel,omitempty"`
 }
 
 // HtbRootSpec defines root HTB settings and target host interface.
@@ -132,7 +163,12 @@ type HtbRootSpec struct {
 	// +optional
 	DefaultClassMinor int `json:"defaultClassMinor,omitempty"`
 
-	// Custom HTB root handle ID (e.g., 1 for handle 1:0, 2 for handle 2:0). [OPTIONAL]
+	// Default class ID where unclassified traffic is routed (e.g., "1:99"). [OPTIONAL]
+	// +kubebuilder:default="1:99"
+	// +optional
+	DefaultClassID string `json:"defaultClassId,omitempty"`
+
+	// Custom HTB root handle ID (e.g., 1 for handle 1:0). [OPTIONAL]
 	// +kubebuilder:default=1
 	// +optional
 	HtbID int `json:"htbId,omitempty"`
@@ -140,6 +176,22 @@ type HtbRootSpec struct {
 	// List of traffic control classes configured on this interface. [REQUIRED]
 	// +kubebuilder:validation:Required
 	Classes []VlanClassSpec `json:"classes"`
+}
+
+// GetDefaultClassMinor returns DefaultClassMinor, parsing DefaultClassID ("1:99") if DefaultClassMinor isn't directly specified.
+func (r *HtbRootSpec) GetDefaultClassMinor() int {
+	if r.DefaultClassMinor > 0 {
+		return r.DefaultClassMinor
+	}
+	if r.DefaultClassID != "" {
+		parts := strings.Split(r.DefaultClassID, ":")
+		if len(parts) == 2 {
+			if val, err := strconv.Atoi(parts[1]); err == nil {
+				return val
+			}
+		}
+	}
+	return 99
 }
 
 // VlanTrafficControlSpec defines the desired state of VlanTrafficControl.

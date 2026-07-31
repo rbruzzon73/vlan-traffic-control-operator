@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -110,17 +111,17 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// 3. Log Safely Resolved TC Class Handles
 	rootHandle := resolveRootHandle(instance.Spec.HtbRoot.HtbID)
-	defaultClassHandle := resolveDefaultClassHandle(rootHandle, instance.Spec.HtbRoot.DefaultClassMinor)
-	
-	logger.V(1).Info("Resolved HTB handles", 
-		"interface", instance.Spec.HtbRoot.Interface, 
-		"rootHandle", fmt.Sprintf("%d:", rootHandle), 
+	defaultClassHandle := resolveDefaultClassHandle(rootHandle, instance.Spec.HtbRoot.DefaultClassID, instance.Spec.HtbRoot.DefaultClassMinor)
+
+	logger.V(1).Info("Resolved HTB handles",
+		"interface", instance.Spec.HtbRoot.Interface,
+		"rootHandle", fmt.Sprintf("%d:", rootHandle),
 		"defaultClassHandle", defaultClassHandle,
 	)
 
 	for _, class := range instance.Spec.HtbRoot.Classes {
-		classHandle := resolveClassHandle(rootHandle, class.ClassMinor)
-		logger.V(1).Info("Mapped TC Class Handle", "classMinor", class.ClassMinor, "fullHandle", classHandle)
+		classHandle := resolveClassHandle(rootHandle, class.ClassID, class.ClassMinor)
+		logger.V(1).Info("Mapped TC Class Handle", "classID", class.ClassID, "classMinor", class.ClassMinor, "fullHandle", classHandle)
 	}
 
 	// 4. Calculate Spec SHA256 Hash to trigger Agent pod restarts on CRD spec changes
@@ -206,14 +207,20 @@ func resolveRootHandle(htbID int) int {
 	return htbID
 }
 
-func resolveDefaultClassHandle(rootHandle int, defaultMinor int) string {
+func resolveDefaultClassHandle(rootHandle int, defaultClassID string, defaultMinor int) string {
+	if defaultClassID != "" {
+		return defaultClassID
+	}
 	if defaultMinor <= 0 {
 		defaultMinor = 99
 	}
 	return fmt.Sprintf("%d:%d", rootHandle, defaultMinor)
 }
 
-func resolveClassHandle(rootHandle int, classMinor int) string {
+func resolveClassHandle(rootHandle int, classID string, classMinor int) string {
+	if classID != "" {
+		return classID
+	}
 	return fmt.Sprintf("%d:%d", rootHandle, classMinor)
 }
 
@@ -253,6 +260,15 @@ func (r *VlanTrafficControlReconciler) cleanupNodeTrafficControl(ctx context.Con
 	return nil
 }
 
+func getAgentImage() string {
+	// First choice: Environment variable passed by OLM/CSV
+	if img := os.Getenv("RELATED_IMAGE_AGENT"); img != "" {
+		return img
+	}
+	// Fallback choice: Use dedicated agent image repository
+	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.41"
+}
+
 func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(instance *networkingv1alpha1.VlanTrafficControl, namespace, specHash string) *appsv1.DaemonSet {
 	privilegedVal := true
 	hostPathDir := corev1.HostPathDirectory
@@ -285,8 +301,9 @@ func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(instance *networkingv
 					Containers: []corev1.Container{
 						{
 							Name:            "agent",
-							Image:           "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.4",
+							Image:           getAgentImage(),
 							ImagePullPolicy: corev1.PullAlways,
+							Command:         []string{"/agent"},
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: &privilegedVal,
 							},
@@ -392,4 +409,32 @@ func (r *VlanTrafficControlReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		For(&networkingv1alpha1.VlanTrafficControl{}).
 		Owns(&appsv1.DaemonSet{}).
 		Complete(r)
+}
+
+// triggerAgentReconcile notifies all running agent pods to immediately re-apply TC rules
+func (r *VlanTrafficControlReconciler) triggerAgentReconcile(ctx context.Context, namespace string) {
+	logger := log.FromContext(ctx)
+
+	var podList corev1.PodList
+	if err := r.List(ctx, &podList, client.InNamespace(namespace), client.MatchingLabels{"app": "vlan-traffic-control-agent"}); err != nil {
+		logger.Error(err, "Failed listing agent pods for reconciliation trigger")
+		return
+	}
+
+	httpClient := &http.Client{Timeout: 3 * time.Second}
+
+	for _, agentPod := range podList.Items {
+		if agentPod.Status.Phase != corev1.PodRunning || agentPod.Status.PodIP == "" {
+			continue
+		}
+
+		url := fmt.Sprintf("http://%s:8080/reconcile", agentPod.Status.PodIP)
+		resp, err := httpClient.Post(url, "application/json", nil)
+		if err != nil {
+			logger.V(1).Info("Could not send /reconcile trigger to agent pod", "node", agentPod.Spec.NodeName, "error", err)
+			continue
+		}
+		_ = resp.Body.Close()
+		logger.Info("Successfully triggered agent reconciliation", "node", agentPod.Spec.NodeName)
+	}
 }

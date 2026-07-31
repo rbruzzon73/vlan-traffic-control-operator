@@ -1,0 +1,17 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  creationTimestamp: null
+  name: vlan-traffic-control-agent-role
+rules:
+- apiGroups:
+  - networking.med.io
+  resources:
+  - vlantrafficcontrols
+  - vlantrafficcontrols/status
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - patch

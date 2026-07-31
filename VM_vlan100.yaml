@@ -1,0 +1,49 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: test-vm-vlan100
+  namespace: default
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: test-vm-vlan100
+    spec:
+      domain:
+        devices:
+          disks:
+            - name: containerdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+          interfaces:
+            - name: default
+              masquerade: {}
+            - name: vlan100-nic
+              bridge: {}
+        resources:
+          requests:
+            memory: 2Gi
+            cpu: "2"
+      networks:
+        - name: default
+          pod: {}
+        - name: vlan100-nic
+          multus:
+            networkName: default/vlan100-network
+      volumes:
+        - name: containerdisk
+          containerDisk:
+            image: quay.io/containerdisks/centos-stream:9
+        # Inject default login credentials: user=centos / password=password
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              user: redhat
+              password: ocp4
+              chpasswd: { expire: False }
+              ssh_pwauth: True

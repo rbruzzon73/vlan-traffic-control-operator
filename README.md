@@ -883,29 +883,29 @@ Each agent pod exposes an HTTP telemetry interface on port `8080`:
 #### 1. Query All Worker Node Telemetry (via Operator Manager)
 Run this command from inside the cluster manager pod to inspect telemetry across all worker nodes:
 
-\`\`\`bash
+```bash
 for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
   oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
     curl -s "http://${pod_ip}:8080/stats?interface=enp1s0" | jq .
 done
-\`\`\`
+```
 
 #### 2. Query Single VLAN or TC Rule
 Isolate telemetry for a specific VLAN ID (e.g., VLAN 100) or class ID (e.g., `1:100`):
 
-\`\`\`bash
+```bash
 # Filter stats for VLAN 100
 curl -s "http://${agent_pod_ip}:8080/stats?interface=enp1s0&vlan=100" | jq .
 
 # Filter stats by Class ID handle
 curl -s "http://${agent_pod_ip}:8080/stats?interface=enp1s0&classId=1:100" | jq .
-\`\`\`
+```
 
 ---
 
 ### Sample Telemetry Payload (`/stats`)
 
-\`\`\`json
+```json
 {
   "interface": "enp1s0",
   "node": "hub-worker03.ocp4-hub.test.com",
@@ -939,7 +939,7 @@ curl -s "http://${agent_pod_ip}:8080/stats?interface=enp1s0&classId=1:100" | jq 
     }
   ]
 }
-\`\`\`
+```
 
 ---
 

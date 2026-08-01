@@ -943,6 +943,11 @@ curl -s "http://${agent_pod_ip}:8080/stats?interface=enp1s0&classId=1:100" | jq 
 
 ---
 
+yes !
+
+Here is the updated Node Configuration & Alignment Engine section for your README.md, now updated to include the missing host interface drift scenario alongside the fully aligned state example.
+
+Markdown
 ## Node Configuration & Alignment Engine
 
 This section details how the `vlan-traffic-control-agent` DaemonSet performs real-time drift detection and configuration auditing across OpenShift worker nodes. By comparing live kernel qdisc, class, and filter states retrieved via Netlink sockets (`vishvananda/netlink`) against the aggregated target specifications from `VlanTrafficControl` Custom Resources, the engine provides immediate visibility into node configuration alignment and pinpoints specific parameter discrepancies.
@@ -952,10 +957,11 @@ This section details how the `vlan-traffic-control-agent` DaemonSet performs rea
 ### Key Capabilities
 
 * **Deterministic Drift Analysis:** Computes a strict boolean alignment state (`isAligned: true|false`) by matching live kernel socket parameters against the expected CRD specification matrix.
+* **Missing Host Interface Detection:** Automatically flags targeted network interfaces (`br-vlan100`, `enp1s0.100`) that are absent on specific worker nodes, generating clear drift deltas rather than crashing or returning false positives.
 * **Polymorphic Filter Evaluation:** Dynamically evaluates all active kernel classifier types (`Flower`, `U32`, `fw` skb-mark filters, and `GenericFilter`) via Netlink priority handles to eliminate false-negative drift reports when matching skb marks vs VLAN IDs.
 * **Filter Engine Transparency:** Reports the exact kernel classifier module (`fw`, `flower`, `u32`) and protocol ID fulfilling each active ingress policy (`ingressFilters`).
 * **Qdisc Existence Audit:** Verifies the presence of both the root HTB qdisc (`1:`) and ingress policing qdisc (`ffff:`) on the target host interface (`htbQdiscPresent`, `ingressPresent`).
-* **Delta Discrepancy Reporting:** Returns a detailed list of configuration deltas (`driftDeltas`) identifying missing egress classes, orphan qdiscs, missing ingress policing filters, or mismatched TC priorities (`priority`).
+* **Delta Discrepancy Reporting:** Returns a detailed list of configuration deltas (`driftDeltas`) identifying missing host devices, missing egress classes, orphan qdiscs, missing ingress policing filters, or mismatched TC priorities (`priority`).
 * **Multi-CRD Spec Aggregation:** Dynamically merges all active `VlanTrafficControl` resources targeting a given node interface based on `nodeSelector` matching.
 * **Targeted Partial Auditing:** Supports querying alignment for a single class handle (`?classId=1:380`) or VLAN ID to isolate tenant configuration drift without auditing the entire interface hierarchy.
 * **Non-Disruptive Inspection:** Evaluates alignment in-memory using lightweight Netlink socket calls without mutating existing kernel TC structures or blocking data-path traffic.
@@ -996,7 +1002,7 @@ curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:380" | jq
 
 ### Sample Configuration Alignment Payload (`/config`)
 
-#### Fully Aligned State Example (with Ingress Filter Metadata):
+#### 1. Fully Aligned State Example:
 
 ```json
 {
@@ -1051,71 +1057,62 @@ curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:380" | jq
       {
         "priority": 4,
         "type": "flower",
-        "protocol": 36864
+        "protocol": 33024
       }
     ]
   },
   "driftDeltas": []
 }
 ```
-
-#### Misaligned (Drifted) State Example:
+#### 2. Misaligned State - Missing Host Interface (`br-vlan100` absent on worker):
 
 ```json
 {
   "node": "hub-worker01.ocp4-hub.test.com",
-  "interface": "enp1s0",
+  "interface": "br-vlan100",
   "isAligned": false,
   "desired": {
-    "interface": "enp1s0",
+    "interface": "br-vlan100",
     "rate": "10Gbit",
     "classes": [
       {
-        "name": "ovs-marked-flow",
-        "classId": "1:380",
-        "priority": 3,
-        "ingressRate": "100Mbit"
-      },
-      {
-        "name": "raw-htb-no-fqcodel",
-        "classId": "1:400",
-        "priority": 4,
-        "ingressRate": "500Mbit"
+        "name": "storage-vlan-100",
+        "classId": "1:100",
+        "matchType": "subnet",
+        "subnet": "10.0.100.0/24",
+        "egressRate": "50Mbit",
+        "egressCeil": "10Gbit",
+        "ingressRate": "30Mbit",
+        "priority": 1,
+        "enableFqCodel": true
       }
     ]
   },
   "actual": {
-    "htbQdiscPresent": true,
-    "ingressPresent": true,
-    "classes": [
-      { "classId": "1:380", "priority": 3 }
-    ],
-    "ingressFilters": [
-      {
-        "priority": 3,
-        "type": "fw",
-        "protocol": 3
-      }
-    ]
+    "htbQdiscPresent": false,
+    "ingressPresent": false,
+    "classes": [],
+    "ingressFilters": []
   },
   "driftDeltas": [
     {
-      "targetHandle": "class 1:400",
+      "targetHandle": "interface br-vlan100",
       "property": "existence",
-      "expected": "configured",
-      "actual": "missing"
+      "expected": "present on host",
+      "actual": "missing device"
     },
     {
-      "targetHandle": "ingress filter pref 4",
+      "targetHandle": "class 1:100",
       "property": "existence",
       "expected": "configured",
-      "actual": "missing"
+      "actual": "missing (interface br-vlan100 absent)"
     }
   ]
 }
 ```
 
 ---
+
 ## Troubleshooting & Error Code Analysis
 
 This section provides diagnostic procedures, common error code resolutions, and step-by-step troubleshooting workflows for the `VlanTrafficControl` operator, agent DaemonSet, and host-level Traffic Control (TC) subsystem.

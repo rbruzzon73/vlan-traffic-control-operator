@@ -943,6 +943,148 @@ curl -s "http://${agent_pod_ip}:8080/stats?interface=enp1s0&classId=1:100" | jq 
 
 ---
 
+## Node Configuration & Alignment Engine
+
+This section details how the `vlan-traffic-control-agent` DaemonSet performs real-time drift detection and configuration auditing across OpenShift worker nodes. By comparing live kernel qdisc and filter states retrieved via Netlink against the aggregated target specifications from `VlanTrafficControl` Custom Resources, the engine provides immediate visibility into node configuration alignment and pinpoints specific parameter discrepancies.
+
+---
+
+### Key Capabilities
+
+* **Deterministic Drift Analysis:** Computes a strict boolean alignment state (`isAligned: true|false`) by matching live kernel socket parameters against the expected CRD specification matrix.
+* **Delta Discrepancy Reporting:** Returns a detailed list of configuration deltas (`driftDeltas`) identifying missing classes, orphan qdiscs, missing ingress policing filters, or mismatched TC priorities (`prio`).
+* **Multi-CRD Spec Aggregation:** Dynamically merges all active `VlanTrafficControl` resources targeting a given node interface based on `nodeSelector` matching.
+* **Targeted Partial Auditing:** Supports querying alignment for a single class handle (`?classId=1:100`) or VLAN ID to isolate tenant configuration drift without auditing the entire interface hierarchy.
+* **Non-Disruptive Inspection:** Evaluates alignment in-memory using lightweight Netlink socket calls without mutating existing kernel TC structures or blocking data-path traffic.
+
+---
+
+### Alignment Engine Endpoints
+
+The agent pod exposes the following HTTP configuration auditing interface on port `8080`:
+
+| Endpoint | Method | Query Parameters | Description |
+| :--- | :--- | :--- | :--- |
+| `/config` | `GET` | `interface` *(required)*, `classId` *(optional)* | Audits live host kernel TC state against desired CRD specifications and returns a structured drift report. |
+
+---
+
+### Auditing Configuration Alignment
+
+#### 1. Audit Full Node Configuration Alignment Across Worker Cluster
+Run this command from inside the cluster manager pod to check alignment across all worker nodes:
+
+```bash
+for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+  oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+    curl -s "http://${pod_ip}:8080/config?interface=enp1s0" | jq .
+done
+```
+
+#### 2. Audit Single VLAN or TC Rule Alignment
+Isolate alignment status for a specific class ID handle (e.g., `1:100` / VLAN 100):
+
+```bash
+# Audit alignment for TC Class 1:100
+curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:100" | jq .
+```
+
+---
+
+### Sample Configuration Alignment Payload (`/config`)
+
+#### Aligned State Example:
+
+```json
+{
+  "node": "hub-worker03.ocp4-hub.test.com",
+  "interface": "enp1s0",
+  "isAligned": true,
+  "desired": {
+    "interface": "enp1s0",
+    "rate": "10Gbit",
+    "classes": [
+      {
+        "classId": "1:100",
+        "priority": 1,
+        "rate": "1Gbit",
+        "ceil": "2Gbit"
+      }
+    ]
+  },
+  "actual": {
+    "htbQdiscPresent": true,
+    "ingressPresent": true,
+    "classes": [
+      {
+        "classId": "1:100",
+        "priority": 1
+      }
+    ]
+  },
+  "driftDeltas": []
+}
+```
+
+#### Misaligned (Drifted) State Example:
+
+```json
+{
+  "node": "hub-worker03.ocp4-hub.test.com",
+  "interface": "enp1s0",
+  "isAligned": false,
+  "desired": {
+    "interface": "enp1s0",
+    "rate": "10Gbit",
+    "classes": [
+      {
+        "classId": "1:100",
+        "priority": 1,
+        "rate": "1Gbit",
+        "ceil": "2Gbit"
+      },
+      {
+        "classId": "1:200",
+        "priority": 2,
+        "rate": "500Mbit",
+        "ceil": "1Gbit"
+      }
+    ]
+  },
+  "actual": {
+    "htbQdiscPresent": true,
+    "ingressPresent": true,
+    "classes": [
+      {
+        "classId": "1:100",
+        "priority": 3
+      }
+    ]
+  },
+  "driftDeltas": [
+    {
+      "targetHandle": "class 1:100",
+      "property": "priority",
+      "expected": "1",
+      "actual": "3"
+    },
+    {
+      "targetHandle": "class 1:200",
+      "property": "existence",
+      "expected": "configured",
+      "actual": "missing"
+    },
+    {
+      "targetHandle": "ingress filter pref 200",
+      "property": "existence",
+      "expected": "configured",
+      "actual": "missing"
+    }
+  ]
+}
+```
+
+---
 ## Troubleshooting & Error Code Analysis
 
 This section provides diagnostic procedures, common error code resolutions, and step-by-step troubleshooting workflows for the `VlanTrafficControl` operator, agent DaemonSet, and host-level Traffic Control (TC) subsystem.

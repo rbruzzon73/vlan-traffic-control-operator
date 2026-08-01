@@ -945,21 +945,24 @@ curl -s "http://${agent_pod_ip}:8080/stats?interface=enp1s0&classId=1:100" | jq 
 
 ## Node Configuration & Alignment Engine
 
-This section details how the `vlan-traffic-control-agent` DaemonSet performs real-time drift detection and configuration auditing across OpenShift worker nodes. By comparing live kernel qdisc and filter states retrieved via Netlink against the aggregated target specifications from `VlanTrafficControl` Custom Resources, the engine provides immediate visibility into node configuration alignment and pinpoints specific parameter discrepancies.
+This section details how the `vlan-traffic-control-agent` DaemonSet performs real-time drift detection and configuration auditing across OpenShift worker nodes. By comparing live kernel qdisc, class, and filter states retrieved via Netlink sockets (`vishvananda/netlink`) against the aggregated target specifications from `VlanTrafficControl` Custom Resources, the engine provides immediate visibility into node configuration alignment and pinpoints specific parameter discrepancies.
 
 ---
 
 ### Key Capabilities
 
 * **Deterministic Drift Analysis:** Computes a strict boolean alignment state (`isAligned: true|false`) by matching live kernel socket parameters against the expected CRD specification matrix.
-* **Delta Discrepancy Reporting:** Returns a detailed list of configuration deltas (`driftDeltas`) identifying missing classes, orphan qdiscs, missing ingress policing filters, or mismatched TC priorities (`prio`).
+* **Polymorphic Filter Evaluation:** Dynamically evaluates all active kernel classifier types (`Flower`, `U32`, `fw` skb-mark filters, and `GenericFilter`) via Netlink priority handles to eliminate false-negative drift reports when matching skb marks vs VLAN IDs.
+* **Filter Engine Transparency:** Reports the exact kernel classifier module (`fw`, `flower`, `u32`) and protocol ID fulfilling each active ingress policy (`ingressFilters`).
+* **Qdisc Existence Audit:** Verifies the presence of both the root HTB qdisc (`1:`) and ingress policing qdisc (`ffff:`) on the target host interface (`htbQdiscPresent`, `ingressPresent`).
+* **Delta Discrepancy Reporting:** Returns a detailed list of configuration deltas (`driftDeltas`) identifying missing egress classes, orphan qdiscs, missing ingress policing filters, or mismatched TC priorities (`priority`).
 * **Multi-CRD Spec Aggregation:** Dynamically merges all active `VlanTrafficControl` resources targeting a given node interface based on `nodeSelector` matching.
-* **Targeted Partial Auditing:** Supports querying alignment for a single class handle (`?classId=1:100`) or VLAN ID to isolate tenant configuration drift without auditing the entire interface hierarchy.
+* **Targeted Partial Auditing:** Supports querying alignment for a single class handle (`?classId=1:380`) or VLAN ID to isolate tenant configuration drift without auditing the entire interface hierarchy.
 * **Non-Disruptive Inspection:** Evaluates alignment in-memory using lightweight Netlink socket calls without mutating existing kernel TC structures or blocking data-path traffic.
 
 ---
 
-### Alignment Engine Endpoints
+### Alignment Engine Endpoint (`/config`)
 
 The agent pod exposes the following HTTP configuration auditing interface on port `8080`:
 
@@ -982,22 +985,22 @@ done
 ```
 
 #### 2. Audit Single VLAN or TC Rule Alignment
-Isolate alignment status for a specific class ID handle (e.g., `1:100` / VLAN 100):
+Isolate alignment status for a specific class ID handle (e.g., `1:380` / VLAN 380):
 
 ```bash
-# Audit alignment for TC Class 1:100
-curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:100" | jq .
+# Audit alignment for TC Class 1:380
+curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:380" | jq .
 ```
 
 ---
 
 ### Sample Configuration Alignment Payload (`/config`)
 
-#### Aligned State Example:
+#### Fully Aligned State Example (with Ingress Filter Metadata):
 
 ```json
 {
-  "node": "hub-worker03.ocp4-hub.test.com",
+  "node": "hub-worker01.ocp4-hub.test.com",
   "interface": "enp1s0",
   "isAligned": true,
   "desired": {
@@ -1005,10 +1008,28 @@ curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:100" | jq
     "rate": "10Gbit",
     "classes": [
       {
-        "classId": "1:100",
-        "priority": 1,
-        "rate": "1Gbit",
-        "ceil": "2Gbit"
+        "name": "ovs-marked-flow",
+        "classId": "1:380",
+        "matchType": "mark",
+        "mark": 16,
+        "egressRate": "500Mbit",
+        "egressCeil": "500Mbit",
+        "egressBurst": "50k",
+        "ingressRate": "100Mbit",
+        "ingressBurst": "20k",
+        "priority": 3,
+        "enableFqCodel": true
+      },
+      {
+        "name": "raw-htb-no-fqcodel",
+        "classId": "1:400",
+        "matchType": "auto",
+        "vlanId": 400,
+        "egressRate": "1Gbit",
+        "egressCeil": "2Gbit",
+        "ingressRate": "500Mbit",
+        "priority": 4,
+        "enableFqCodel": false
       }
     ]
   },
@@ -1016,9 +1037,21 @@ curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:100" | jq
     "htbQdiscPresent": true,
     "ingressPresent": true,
     "classes": [
+      { "classId": "1:99" },
+      { "classId": "1:1" },
+      { "classId": "1:380", "priority": 3 },
+      { "classId": "1:400", "priority": 4 }
+    ],
+    "ingressFilters": [
       {
-        "classId": "1:100",
-        "priority": 1
+        "priority": 3,
+        "type": "fw",
+        "protocol": 3
+      },
+      {
+        "priority": 4,
+        "type": "flower",
+        "protocol": 36864
       }
     ]
   },
@@ -1030,7 +1063,7 @@ curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:100" | jq
 
 ```json
 {
-  "node": "hub-worker03.ocp4-hub.test.com",
+  "node": "hub-worker01.ocp4-hub.test.com",
   "interface": "enp1s0",
   "isAligned": false,
   "desired": {
@@ -1038,16 +1071,16 @@ curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:100" | jq
     "rate": "10Gbit",
     "classes": [
       {
-        "classId": "1:100",
-        "priority": 1,
-        "rate": "1Gbit",
-        "ceil": "2Gbit"
+        "name": "ovs-marked-flow",
+        "classId": "1:380",
+        "priority": 3,
+        "ingressRate": "100Mbit"
       },
       {
-        "classId": "1:200",
-        "priority": 2,
-        "rate": "500Mbit",
-        "ceil": "1Gbit"
+        "name": "raw-htb-no-fqcodel",
+        "classId": "1:400",
+        "priority": 4,
+        "ingressRate": "500Mbit"
       }
     ]
   },
@@ -1055,27 +1088,25 @@ curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:100" | jq
     "htbQdiscPresent": true,
     "ingressPresent": true,
     "classes": [
+      { "classId": "1:380", "priority": 3 }
+    ],
+    "ingressFilters": [
       {
-        "classId": "1:100",
-        "priority": 3
+        "priority": 3,
+        "type": "fw",
+        "protocol": 3
       }
     ]
   },
   "driftDeltas": [
     {
-      "targetHandle": "class 1:100",
-      "property": "priority",
-      "expected": "1",
-      "actual": "3"
-    },
-    {
-      "targetHandle": "class 1:200",
+      "targetHandle": "class 1:400",
       "property": "existence",
       "expected": "configured",
       "actual": "missing"
     },
     {
-      "targetHandle": "ingress filter pref 200",
+      "targetHandle": "ingress filter pref 4",
       "property": "existence",
       "expected": "configured",
       "actual": "missing"

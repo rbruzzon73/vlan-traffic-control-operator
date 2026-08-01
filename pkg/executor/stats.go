@@ -1,184 +1,252 @@
 package executor
 
 import (
-	"bufio"
 	"fmt"
-	"strconv"
-	"strings"
+	"os"
+
+	"github.com/vishvananda/netlink"
+	networkingv1alpha1 "networking.med.io/vlan-traffic-control/api/v1alpha1"
 )
 
-// ClassStats holds structured traffic metrics for an HTB class
-type ClassStats struct {
-	ClassID    string `json:"classId"`
-	Bytes      uint64 `json:"bytes"`
-	Packets    uint64 `json:"packets"`
-	Drops      uint64 `json:"drops,omitempty"`
-	Overlimits uint64 `json:"overlimits,omitempty"`
-	RateBytes  uint64 `json:"rateBytes,omitempty"`
-	RatePkt    uint64 `json:"ratePkt,omitempty"`
-}
+// CollectInterfaceStats queries Netlink to collect live byte, packet, and drop metrics.
+func CollectInterfaceStats(ifaceName string, rootSpec *networkingv1alpha1.HtbRootSpec) (*networkingv1alpha1.InterfaceStats, error) {
+	nodeName := os.Getenv("NODE_NAME")
+	if nodeName == "" {
+		nodeName, _ = os.Hostname()
+	}
 
-// IngressFilterStats holds structured traffic metrics for an ingress policing filter
-type IngressFilterStats struct {
-	FilterID string `json:"filterId"`
-	Bytes    uint64 `json:"bytes"`
-	Packets  uint64 `json:"packets"`
-	Drops    uint64 `json:"drops"`
-}
+	stats := &networkingv1alpha1.InterfaceStats{
+		Interface:    ifaceName,
+		Node:         nodeName,
+		ClassStats:   make([]networkingv1alpha1.ClassStat, 0),
+		IngressStats: make([]networkingv1alpha1.IngressStat, 0),
+	}
 
-// GetHtbClassStatsStructured parses `tc -s class show dev <iface>` output into structured Go structs
-func GetHtbClassStatsStructured(iface string) ([]ClassStats, error) {
-	cmd := execHostCommand("tc", "-s", "class", "show", "dev", iface)
-	out, err := cmd.CombinedOutput()
+	link, err := netlink.LinkByName(ifaceName)
 	if err != nil {
-		return nil, fmt.Errorf("failed fetching HTB class stats on %s: %w (%s)", iface, err, strings.TrimSpace(string(out)))
+		// Return clean JSON struct with empty arrays if device is absent on this host
+		return stats, nil
 	}
 
-	var stats []ClassStats
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	var current *ClassStats
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		// Header line: class htb 1:10 parent 1:1 prio 0 rate 100Mbit ceil 500Mbit ...
-		if strings.HasPrefix(line, "class htb") {
-			if current != nil {
-				stats = append(stats, *current)
-			}
-			parts := strings.Fields(line)
-			classID := ""
-			if len(parts) >= 3 {
-				classID = parts[2]
-			}
-			current = &ClassStats{
-				ClassID: classID,
-			}
-			continue
-		}
-
-		if current == nil {
-			continue
-		}
-
-		// Line 2: Sent 123456 bytes 1234 pkt (dropped 0, overlimits 0 requeues 0)
-		if strings.HasPrefix(line, "Sent") {
-			parts := strings.Fields(line)
-			for i := 0; i < len(parts); i++ {
-				if parts[i] == "bytes" && i > 0 {
-					current.Bytes, _ = strconv.ParseUint(parts[i-1], 10, 64)
+	// 1. Collect Egress HTB Class Statistics
+	classes, err := netlink.ClassList(link, netlink.MakeHandle(1, 0))
+	if err == nil {
+		for _, c := range classes {
+			if htb, ok := c.(*netlink.HtbClass); ok {
+				attrs := htb.Attrs()
+				if attrs == nil {
+					continue
 				}
-				if parts[i] == "pkt" && i > 0 {
-					current.Packets, _ = strconv.ParseUint(parts[i-1], 10, 64)
-				}
-				if strings.HasPrefix(parts[i], "dropped") && i+1 < len(parts) {
-					cleanVal := strings.TrimRight(parts[i+1], ",")
-					current.Drops, _ = strconv.ParseUint(cleanVal, 10, 64)
-				}
-				if strings.HasPrefix(parts[i], "overlimits") && i+1 < len(parts) {
-					cleanVal := strings.TrimRight(parts[i+1], ",")
-					current.Overlimits, _ = strconv.ParseUint(cleanVal, 10, 64)
-				}
-			}
-		}
 
-		// Line 3: rate 10Mbit 1000pps backlog 0b 0p requeues 0
-		if strings.HasPrefix(line, "rate") {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				current.RateBytes = parseRateToBytes(parts[1])
+				classID := netlink.HandleStr(attrs.Handle)
+				className := ""
+
+				if rootSpec != nil {
+					for _, plannedCls := range rootSpec.Classes {
+						if plannedCls.GetClassID(rootSpec.HtbID) == classID {
+							className = plannedCls.Name
+							break
+						}
+					}
+					if className == "" && (classID == "1:99" || classID == fmt.Sprintf("%d:99", rootSpec.HtbID)) {
+						className = "default-fallback"
+					}
+				}
+
+				var bytes, pkts, overlimits, lended uint64
+				if attrs.Statistics != nil {
+					if attrs.Statistics.Basic != nil {
+						bytes = attrs.Statistics.Basic.Bytes
+						pkts = uint64(attrs.Statistics.Basic.Packets)
+					}
+					if attrs.Statistics.Queue != nil {
+						overlimits = uint64(attrs.Statistics.Queue.Overlimits)
+					}
+				}
+
+				stats.ClassStats = append(stats.ClassStats, networkingv1alpha1.ClassStat{
+					ClassID:    classID,
+					Name:       className,
+					Prio:       int(htb.Prio),
+					Bytes:      bytes,
+					Packets:    pkts,
+					Overlimits: overlimits,
+					Borrowed:   lended,
+				})
 			}
 		}
 	}
 
-	if current != nil {
-		stats = append(stats, *current)
-	}
-
-	return stats, nil
-}
-
-// GetIngressFilterStatsStructured parses `tc -s filter show dev <iface> ingress` output
-func GetIngressFilterStatsStructured(iface string) ([]IngressFilterStats, error) {
-	cmd := execHostCommand("tc", "-s", "filter", "show", "dev", iface, "ingress")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("failed fetching ingress filter stats on %s: %w (%s)", iface, err, strings.TrimSpace(string(out)))
-	}
-
-	var stats []IngressFilterStats
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	var current *IngressFilterStats
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		if strings.HasPrefix(line, "filter") {
-			if current != nil {
-				stats = append(stats, *current)
+	// 2. Collect Ingress Policing Filter Statistics Across ALL Classifier Types (fw, flower, u32)
+	filters, err := netlink.FilterList(link, netlink.HANDLE_INGRESS)
+	if err == nil {
+		for _, f := range filters {
+			attrs := f.Attrs()
+			if attrs == nil {
+				continue
 			}
-			parts := strings.Fields(line)
-			filterID := ""
-			if len(parts) >= 3 {
-				filterID = parts[2]
+
+			filterID := fmt.Sprintf("pref %d", attrs.Priority)
+			classID := fmt.Sprintf("1:%d", attrs.Priority)
+
+			var bytes, pkts, drops uint64
+
+			// Extract policing action statistics dynamically based on concrete filter type
+			var actions []netlink.Action
+			switch v := f.(type) {
+			case *netlink.Flower:
+				actions = v.Actions
+			case *netlink.U32:
+				actions = v.Actions
+			case *netlink.GenericFilter:
+				actions = nil
 			}
-			current = &IngressFilterStats{
+
+			for _, action := range actions {
+				if actAttrs := action.Attrs(); actAttrs != nil && actAttrs.Statistics != nil {
+					if actAttrs.Statistics.Basic != nil {
+						bytes += actAttrs.Statistics.Basic.Bytes
+						pkts += uint64(actAttrs.Statistics.Basic.Packets)
+					}
+					if actAttrs.Statistics.Queue != nil {
+						drops += uint64(actAttrs.Statistics.Queue.Drops)
+					}
+				}
+			}
+
+			stats.IngressStats = append(stats.IngressStats, networkingv1alpha1.IngressStat{
+				ClassID:  classID,
 				FilterID: filterID,
-			}
-			continue
+				Bytes:    bytes,
+				Packets:  pkts,
+				Drops:    drops,
+			})
 		}
-
-		if current == nil {
-			continue
-		}
-
-		// Policing action counter line: Action 1: police ... Sent 12345 bytes 100 pkt (dropped 5 ...)
-		if strings.Contains(line, "Sent") {
-			parts := strings.Fields(line)
-			for i := 0; i < len(parts); i++ {
-				if parts[i] == "bytes" && i > 0 {
-					current.Bytes, _ = strconv.ParseUint(parts[i-1], 10, 64)
-				}
-				if parts[i] == "pkt" && i > 0 {
-					current.Packets, _ = strconv.ParseUint(parts[i-1], 10, 64)
-				}
-				if strings.HasPrefix(parts[i], "dropped") && i+1 < len(parts) {
-					cleanVal := strings.TrimRight(parts[i+1], ",")
-					current.Drops, _ = strconv.ParseUint(cleanVal, 10, 64)
-				}
-			}
-		}
-	}
-
-	if current != nil {
-		stats = append(stats, *current)
 	}
 
 	return stats, nil
 }
 
-func parseRateToBytes(rateStr string) uint64 {
-	rateStr = strings.ToLower(strings.TrimSpace(rateStr))
-	var multiplier uint64 = 1
-
-	switch {
-	case strings.HasSuffix(rateStr, "gbit"):
-		multiplier = 1000 * 1000 * 1000 / 8
-		rateStr = strings.TrimSuffix(rateStr, "gbit")
-	case strings.HasSuffix(rateStr, "mbit"):
-		multiplier = 1000 * 1000 / 8
-		rateStr = strings.TrimSuffix(rateStr, "mbit")
-	case strings.HasSuffix(rateStr, "kbit"):
-		multiplier = 1000 / 8
-		rateStr = strings.TrimSuffix(rateStr, "kbit")
-	case strings.HasSuffix(rateStr, "bps"):
-		multiplier = 1
-		rateStr = strings.TrimSuffix(rateStr, "bps")
+// GetInterfaceStatsFiltered matches the 4-argument signature called by cmd/agent/main.go.
+func GetInterfaceStatsFiltered(ifaceName string, filterClasses map[string]string, rootHtbID int, targetClassID string) (*networkingv1alpha1.InterfaceStats, error) {
+	nodeName := os.Getenv("NODE_NAME")
+	if nodeName == "" {
+		nodeName, _ = os.Hostname()
 	}
 
-	val, err := strconv.ParseUint(rateStr, 10, 64)
+	stats := &networkingv1alpha1.InterfaceStats{
+		Interface:    ifaceName,
+		Node:         nodeName,
+		ClassStats:   make([]networkingv1alpha1.ClassStat, 0),
+		IngressStats: make([]networkingv1alpha1.IngressStat, 0),
+	}
+
+	link, err := netlink.LinkByName(ifaceName)
 	if err != nil {
-		return 0
+		return stats, nil
 	}
-	return val * multiplier
+
+	if rootHtbID <= 0 {
+		rootHtbID = 1
+	}
+
+	// 1. Collect Egress HTB Class Statistics
+	classes, err := netlink.ClassList(link, netlink.MakeHandle(uint16(rootHtbID), 0))
+	if err == nil {
+		for _, c := range classes {
+			if htb, ok := c.(*netlink.HtbClass); ok {
+				attrs := htb.Attrs()
+				if attrs == nil {
+					continue
+				}
+
+				classID := netlink.HandleStr(attrs.Handle)
+
+				// Filter by target class ID if specified
+				if targetClassID != "" && classID != targetClassID {
+					continue
+				}
+
+				className := ""
+				if filterClasses != nil {
+					className = filterClasses[classID]
+				}
+				if className == "" && classID == fmt.Sprintf("%d:99", rootHtbID) {
+					className = "default-fallback"
+				}
+
+				var bytes, pkts, overlimits, lended uint64
+				if attrs.Statistics != nil {
+					if attrs.Statistics.Basic != nil {
+						bytes = attrs.Statistics.Basic.Bytes
+						pkts = uint64(attrs.Statistics.Basic.Packets)
+					}
+					if attrs.Statistics.Queue != nil {
+						overlimits = uint64(attrs.Statistics.Queue.Overlimits)
+					}
+				}
+
+				stats.ClassStats = append(stats.ClassStats, networkingv1alpha1.ClassStat{
+					ClassID:    classID,
+					Name:       className,
+					Prio:       int(htb.Prio),
+					Bytes:      bytes,
+					Packets:    pkts,
+					Overlimits: overlimits,
+					Borrowed:   lended,
+				})
+			}
+		}
+	}
+
+	// 2. Collect Ingress Policing Filter Statistics
+	filters, err := netlink.FilterList(link, netlink.HANDLE_INGRESS)
+	if err == nil {
+		for _, f := range filters {
+			attrs := f.Attrs()
+			if attrs == nil {
+				continue
+			}
+
+			filterID := fmt.Sprintf("pref %d", attrs.Priority)
+			classID := fmt.Sprintf("%d:%d", rootHtbID, attrs.Priority)
+
+			if targetClassID != "" && classID != targetClassID {
+				continue
+			}
+
+			var bytes, pkts, drops uint64
+			var actions []netlink.Action
+			switch v := f.(type) {
+			case *netlink.Flower:
+				actions = v.Actions
+			case *netlink.U32:
+				actions = v.Actions
+			case *netlink.GenericFilter:
+				actions = nil
+			}
+
+			for _, action := range actions {
+				if actAttrs := action.Attrs(); actAttrs != nil && actAttrs.Statistics != nil {
+					if actAttrs.Statistics.Basic != nil {
+						bytes += actAttrs.Statistics.Basic.Bytes
+						pkts += uint64(actAttrs.Statistics.Basic.Packets)
+					}
+					if actAttrs.Statistics.Queue != nil {
+						drops += uint64(actAttrs.Statistics.Queue.Drops)
+					}
+				}
+			}
+
+			stats.IngressStats = append(stats.IngressStats, networkingv1alpha1.IngressStat{
+				ClassID:  classID,
+				FilterID: filterID,
+				Bytes:    bytes,
+				Packets:  pkts,
+				Drops:    drops,
+			})
+		}
+	}
+
+	return stats, nil
 }

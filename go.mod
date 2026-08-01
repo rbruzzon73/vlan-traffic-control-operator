@@ -5,6 +5,7 @@ go 1.22.0
 require (
 	github.com/go-logr/logr v1.4.1
 	github.com/go-logr/zapr v1.3.0
+	github.com/vishvananda/netlink v1.3.1
 	go.uber.org/zap v1.26.0
 	k8s.io/api v0.30.0
 	k8s.io/apimachinery v0.30.0
@@ -43,6 +44,7 @@ require (
 	github.com/prometheus/common v0.44.0 // indirect
 	github.com/prometheus/procfs v0.12.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
+	github.com/vishvananda/netns v0.0.5 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/exp v0.0.0-20220722155223-a9213eeb770e // indirect
 	golang.org/x/net v0.23.0 // indirect

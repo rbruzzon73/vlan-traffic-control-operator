@@ -192,9 +192,7 @@ func ApplyClassEgressFilter(iface string, cls networkingv1alpha1.VlanClassSpec, 
 	}
 	prioStr := fmt.Sprintf("%d", prioVal)
 
-	// AUTO-CLEANUP STALE FILTERS:
-	// Flush ANY filter at this priority across all protocol layers (802.1q, ip, all)
-	// so protocol mismatches (e.g., switching from 802.1q to IP) never throw RTNETLINK errors.
+	// AUTO-CLEANUP STALE FILTERS
 	for _, p := range []string{proto, "802.1q", "ip", "all"} {
 		_, _ = execHostCmdSilent("filter", "del", "dev", iface, "parent", filterParentStr, "prio", prioStr, "protocol", p)
 	}
@@ -227,7 +225,7 @@ func ApplyClassEgressFilter(iface string, cls networkingv1alpha1.VlanClassSpec, 
 	return nil
 }
 
-// ApplyClassIngressPolice applies ingress policing filter
+// ApplyClassIngressPolice applies ingress policing filter with priority handle matching
 func ApplyClassIngressPolice(iface string, cls networkingv1alpha1.VlanClassSpec, rootHandle int, log logr.Logger) error {
 	if cls.IngressRate == "" {
 		return nil
@@ -253,8 +251,7 @@ func ApplyClassIngressPolice(iface string, cls networkingv1alpha1.VlanClassSpec,
 		ingressBurst = "100k"
 	}
 
-	// AUTO-CLEANUP STALE FILTERS:
-	// Flush ANY ingress filter at this priority across all potential protocols
+	// AUTO-CLEANUP STALE FILTERS
 	for _, p := range []string{proto, "ip", "802.1q", "all"} {
 		_, _ = execHostCmdSilent("filter", "del", "dev", iface, "parent", "ffff:", "prio", prioStr, "protocol", p)
 	}
@@ -288,7 +285,7 @@ func ApplyClassIngressPolice(iface string, cls networkingv1alpha1.VlanClassSpec,
 	return nil
 }
 
-// Helper: Check if a specific qdisc type (e.g. "htb", "ingress") exists on interface
+// Helper: Check if a specific qdisc type exists on interface
 func isQdiscPresent(iface string, qdiscType string, log logr.Logger) bool {
 	cmd := exec.Command("chroot", "/host", "tc", "qdisc", "show", "dev", iface)
 	out, err := cmd.CombinedOutput()
@@ -298,7 +295,7 @@ func isQdiscPresent(iface string, qdiscType string, log logr.Logger) bool {
 	return strings.Contains(string(out), qdiscType)
 }
 
-// Helper: Run command on host network namespace with error logging, stderr capture, and direction metadata
+// Helper: Run command on host network namespace with error logging
 func execHostCmd(log logr.Logger, direction string, args ...string) (string, error) {
 	fullCmdStr := "tc " + strings.Join(args, " ")
 	fullArgs := append([]string{"/host", "tc"}, args...)
@@ -318,7 +315,7 @@ func execHostCmd(log logr.Logger, direction string, args ...string) (string, err
 	return outputStr, nil
 }
 
-// Helper: Run command silently without logging errors (for pre-cleanups)
+// Helper: Run command silently without logging errors
 func execHostCmdSilent(args ...string) (string, error) {
 	fullArgs := append([]string{"/host", "tc"}, args...)
 	cmd := exec.Command("chroot", fullArgs...)

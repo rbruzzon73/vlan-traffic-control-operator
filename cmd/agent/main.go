@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
@@ -70,35 +71,58 @@ func main() {
 	log.Info("[INIT] Running startup TC reconciliation pass...")
 	reconcileLocalTc(k8sClient, log)
 
-	// 4. HTTP /stats Handler
+	// 4. HTTP /stats Handler (Direct Netlink Querying with Filtering)
 	http.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
 		iface := r.URL.Query().Get("interface")
 		if iface == "" {
 			iface = "enp1s0"
 		}
 
-		log.Info("[API] GET /stats", "clientIP", r.RemoteAddr, "interface", iface)
+		// Parse optional target VLAN or ClassID filters
+		var targetVlan int
+		if vlanStr := r.URL.Query().Get("vlan"); vlanStr != "" {
+			targetVlan, _ = strconv.Atoi(vlanStr)
+		}
+		targetClassID := r.URL.Query().Get("classId")
 
-		classStats, errClass := executor.GetHtbClassStatsStructured(iface)
-		if errClass != nil {
-			log.Error(errClass, "[API] Failed retrieving HTB class stats", "interface", iface)
+		log.Info("[API] GET /stats", "clientIP", r.RemoteAddr, "interface", iface, "targetVlan", targetVlan, "targetClassID", targetClassID)
+
+		// Build classMap (mapping "1:100" -> "storage-vlan-100") from active CRDs
+		classMap := make(map[string]string)
+		ctx := context.Background()
+		var list networkingv1alpha1.VlanTrafficControlList
+		if err := k8sClient.List(ctx, &list); err == nil {
+			for _, item := range list.Items {
+				rootHandle := item.Spec.HtbRoot.HtbID
+				if rootHandle <= 0 {
+					rootHandle = 1
+				}
+				for _, cls := range item.Spec.HtbRoot.Classes {
+					cHandle := cls.GetClassID(rootHandle)
+					if cls.Name != "" {
+						classMap[cHandle] = cls.Name
+					}
+				}
+			}
 		}
 
-		ingressStats, errIngress := executor.GetIngressFilterStatsStructured(iface)
-		if errIngress != nil {
-			log.Error(errIngress, "[API] Failed retrieving ingress filter stats", "interface", iface)
+		// Query statistics via high-performance Netlink socket
+		stats, errStats := executor.GetInterfaceStatsFiltered(iface, classMap, targetVlan, targetClassID)
+		if errStats != nil {
+			log.Error(errStats, "[API] Failed retrieving Netlink stats", "interface", iface)
+			http.Error(w, fmt.Sprintf("failed retrieving stats: %v", errStats), http.StatusInternalServerError)
+			return
 		}
 
-		log.Info("[API] GET /stats completed", "interface", iface, "classesFound", len(classStats), "ingressRulesFound", len(ingressStats))
+		log.Info("[API] GET /stats completed",
+			"interface", iface,
+			"classesFound", len(stats.ClassStats),
+			"ingressRulesFound", len(stats.IngressStats),
+		)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"node":         nodeName,
-			"interface":    iface,
-			"classStats":   classStats,
-			"ingressStats": ingressStats,
-		})
+		_ = json.NewEncoder(w).Encode(stats)
 	})
 
 	// 5. HTTP /cleanup Handler (Full Root & Ingress Qdisc Wipe)
@@ -147,6 +171,46 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"reconciled","node":"` + nodeName + `"}`))
 	})
+
+        // 7. HTTP /config Handler (Full or Partial Alignment Verification)
+        http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+            iface := r.URL.Query().Get("interface")
+            if iface == "" {
+                iface = "enp1s0"
+            }
+
+            targetClassID := r.URL.Query().Get("classId") // Optional partial query parameter
+
+            // 1. Aggregate planned CRDs active for this node
+            ctx := context.Background()
+            var list networkingv1alpha1.VlanTrafficControlList
+            if err := k8sClient.List(ctx, &list); err != nil {
+                http.Error(w, "failed listing CRD specs", http.StatusInternalServerError)
+                return
+            }
+
+            // Merge planned root specs for target interface
+            var aggregatedSpec networkingv1alpha1.HtbRootSpec
+            aggregatedSpec.Interface = iface
+            aggregatedSpec.Rate = "10Gbit" // Default root capacity
+
+            for _, item := range list.Items {
+                if item.Spec.HtbRoot.Interface == iface {
+                    aggregatedSpec.Classes = append(aggregatedSpec.Classes, item.Spec.HtbRoot.Classes...)
+                }
+            }
+
+            // 2. Perform Netlink Drift Analysis
+            report, err := executor.InspectNodeAlignment(&aggregatedSpec, targetClassID)
+            if err != nil {
+                http.Error(w, fmt.Sprintf("alignment check failed: %v", err), http.StatusInternalServerError)
+                return
+            }
+
+            w.Header().Set("Content-Type", "application/json")
+            w.WriteHeader(http.StatusOK)
+            _ = json.NewEncoder(w).Encode(report)
+        })
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

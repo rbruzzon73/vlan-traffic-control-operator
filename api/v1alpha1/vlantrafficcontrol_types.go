@@ -133,6 +133,7 @@ func (c *VlanClassSpec) GetClassID(rootHtbID int) string {
 
 // HtbClassSpec defines HTB class execution parameters used internally by executor engines.
 type HtbClassSpec struct {
+	Name          string         `json:"name,omitempty"`
 	ClassID       string         `json:"classId"`
 	ClassMinor    int            `json:"classMinor,omitempty"`
 	VlanID        int            `json:"vlanId,omitempty"`
@@ -194,6 +195,36 @@ func (r *HtbRootSpec) GetDefaultClassMinor() int {
 	return 99
 }
 
+// --- TELEMETRY / STATS STRUCTURES ---
+
+// InterfaceStats represents the complete telemetry payload for a node's network interface.
+type InterfaceStats struct {
+	Interface    string        `json:"interface"`
+	Node         string        `json:"node"`
+	ClassStats   []ClassStat   `json:"classStats"`
+	IngressStats []IngressStat `json:"ingressStats"`
+}
+
+// ClassStat defines egress HTB class telemetry.
+type ClassStat struct {
+	ClassID    string `json:"classId"`
+	Name       string `json:"name,omitempty"`
+	Prio       int    `json:"prio"`
+	Bytes      uint64 `json:"bytes"`
+	Packets    uint64 `json:"packets"`
+	Overlimits uint64 `json:"overlimits"`
+	Borrowed   uint64 `json:"borrowed"`
+}
+
+// IngressStat defines ingress policing filter telemetry.
+type IngressStat struct {
+	ClassID  string `json:"classId"`
+	FilterID string `json:"filterId"`
+	Bytes    uint64 `json:"bytes"`
+	Packets  uint64 `json:"packets"`
+	Drops    uint64 `json:"drops"`
+}
+
 // VlanTrafficControlSpec defines the desired state of VlanTrafficControl.
 type VlanTrafficControlSpec struct {
 	// Map of node labels used to select target worker nodes. [OPTIONAL]
@@ -251,4 +282,37 @@ func init() {
 		metav1.AddToGroupVersion(s, GroupVersion)
 		return nil
 	})
+}
+
+// NodeConfigReport represents the expected vs live host TC configuration state.
+type NodeConfigReport struct {
+	Node        string             `json:"node"`
+	Interface   string             `json:"interface"`
+	IsAligned   bool               `json:"isAligned"`
+	Desired     HtbRootSpec        `json:"desired"`
+	Actual      LiveNodeConfig     `json:"actual"`
+	DriftDeltas []ConfigDriftDelta `json:"driftDeltas,omitempty"`
+}
+
+// LiveNodeConfig holds what is currently configured in the host kernel.
+type LiveNodeConfig struct {
+	HtbQdiscPresent bool            `json:"htbQdiscPresent"`
+	IngressPresent  bool            `json:"ingressPresent"`
+	RootRate        string          `json:"rootRate,omitempty"`
+	Classes         []HtbClassSpec  `json:"classes"`
+        IngressFilters  []FilterMeta     `json:"ingressFilters,omitempty"`
+}
+
+type FilterMeta struct {
+	Priority uint16 `json:"priority"`
+	Type     string `json:"type"`     // e.g. "fw", "flower", "u32"
+	Protocol uint16 `json:"protocol"`
+}
+
+// ConfigDriftDelta describes a single discrepancy between planned and actual state.
+type ConfigDriftDelta struct {
+	TargetHandle string `json:"targetHandle"` // e.g. "class 1:100" or "ingress pref 100"
+	Property     string `json:"property"`     // e.g. "rate", "prio", "missing"
+	Expected     string `json:"expected"`
+	Actual       string `json:"actual"`
 }

@@ -93,7 +93,7 @@ spec:
               containers:
               - command:
                 - /manager
-                image: ghcr.io/rbruzzon73/vlan-traffic-control-operator:v0.2.41
+                image: ghcr.io/rbruzzon73/vlan-traffic-control-operator:v0.2.50
                 imagePullPolicy: Always
                 name: manager
                 resources:

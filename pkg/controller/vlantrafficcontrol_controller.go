@@ -20,8 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	networkingv1alpha1 "networking.med.io/vlan-traffic-control/api/v1alpha1"
-	"networking.med.io/vlan-traffic-control/pkg/executor"
+	v1alpha1 "networking.med.io/vlan-traffic-control/api/v1alpha1"
 )
 
 const (
@@ -46,14 +45,14 @@ type VlanTrafficControlReconciler struct {
 // +kubebuilder:rbac:groups=networking.med.io,resources=vlantrafficcontrols,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.med.io,resources=vlantrafficcontrols/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=networking.med.io,resources=vlantrafficcontrols/finalizers,verbs=update
-// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=daemonsets;deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods;services;nodes;configmaps;events,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=security.openshift.io,resources=securitycontextconstraints,resourceNames=privileged,verbs=use
 
 func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	var instance networkingv1alpha1.VlanTrafficControl
+	var instance v1alpha1.VlanTrafficControl
 	if err := r.Get(ctx, req.NamespacedName, &instance); err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("VlanTrafficControl resource not found. Cleaning up dependent components.")
@@ -95,6 +94,16 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 				return ctrl.Result{}, err
 			}
 			logger.Info("Successfully finalized VlanTrafficControl and wiped node TC rules")
+
+			// Check if any active VlanTrafficControl CRs remain in the cluster
+			var crList v1alpha1.VlanTrafficControlList
+			if err := r.List(ctx, &crList); err == nil && len(crList.Items) <= 1 {
+				logger.Info("No remaining VlanTrafficControl CRs found - removing Agent DaemonSet")
+				var ds appsv1.DaemonSet
+				if err := r.Get(ctx, client.ObjectKey{Name: "vlan-traffic-control-agent", Namespace: targetNamespace}, &ds); err == nil {
+					_ = r.Delete(ctx, &ds)
+				}
+			}
 		}
 		return ctrl.Result{}, nil
 	}
@@ -137,7 +146,9 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// 5. Build or Update the Agent DaemonSet Manifest
 	agentDaemonSet := r.buildAgentDaemonSet(&instance, targetNamespace, specHash)
 
-	// Avoid cross-namespace controller reference errors if instance is cluster-scoped
+	// Bind Agent DaemonSet lifecycle to Operator Deployment for OLM Garbage Collection
+	_ = r.setOperatorDeploymentOwnerRef(ctx, agentDaemonSet, targetNamespace)
+
 	if instance.Namespace != "" {
 		if err := ctrl.SetControllerReference(&instance, agentDaemonSet, r.Scheme); err != nil {
 			logger.Error(err, "Failed to set controller reference on DaemonSet")
@@ -164,17 +175,40 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 			existingDS.Spec.Template.Annotations = make(map[string]string)
 		}
 
-		// Trigger rolling update if the config hash or node selector has changed
-		if existingDS.Spec.Template.Annotations["networking.med.io/config-hash"] != specHash {
+		currentImage := ""
+		if len(existingDS.Spec.Template.Spec.Containers) > 0 {
+			currentImage = existingDS.Spec.Template.Spec.Containers[0].Image
+		}
+		desiredImage := getAgentImage()
+
+		hashChanged := existingDS.Spec.Template.Annotations["networking.med.io/config-hash"] != specHash
+		imageChanged := currentImage != desiredImage
+
+		// Trigger rollout if spec hash, node selector, OR agent container image tag changed
+		if hashChanged || imageChanged {
+			logger.Info("Updating Agent DaemonSet - triggering rolling restart of agent pods",
+				"hashChanged", hashChanged,
+				"imageChanged", imageChanged,
+				"currentImage", currentImage,
+				"desiredImage", desiredImage,
+			)
+
+			existingDS.OwnerReferences = agentDaemonSet.OwnerReferences
 			existingDS.Spec.Template.Annotations["networking.med.io/config-hash"] = specHash
 			existingDS.Spec.Template.Spec.NodeSelector = instance.Spec.NodeSelector
+			if len(existingDS.Spec.Template.Spec.Containers) > 0 {
+				existingDS.Spec.Template.Spec.Containers[0].Image = desiredImage
+			}
 
-			logger.Info("Updating Agent DaemonSet config hash - triggering rolling restart of agent pods")
 			if err := r.Update(ctx, &existingDS); err != nil {
 				r.updateStatusCondition(&instance, TypeReady, metav1.ConditionFalse, ReasonFailed, fmt.Sprintf("Failed to update DaemonSet: %v", err))
 				_ = r.Status().Update(ctx, &instance)
 				return ctrl.Result{}, fmt.Errorf("failed to update Agent DaemonSet: %w", err)
 			}
+		} else {
+			// Ensure OwnerReferences stay up to date
+			existingDS.OwnerReferences = agentDaemonSet.OwnerReferences
+			_ = r.Update(ctx, &existingDS)
 		}
 	}
 
@@ -197,6 +231,33 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
+}
+
+// setOperatorDeploymentOwnerRef binds the Agent DaemonSet lifecycle to the Operator Deployment
+// for automatic Kubernetes Garbage Collection upon OLM uninstallation.
+func (r *VlanTrafficControlReconciler) setOperatorDeploymentOwnerRef(ctx context.Context, ds *appsv1.DaemonSet, namespace string) error {
+	var depList appsv1.DeploymentList
+	err := r.List(ctx, &depList, client.InNamespace(namespace), client.MatchingLabels{"control-plane": "controller-manager"})
+	if err == nil && len(depList.Items) > 0 {
+		operatorDep := &depList.Items[0]
+		isController := false
+
+		for _, owner := range ds.OwnerReferences {
+			if owner.UID == operatorDep.UID {
+				return nil
+			}
+		}
+
+		ds.OwnerReferences = append(ds.OwnerReferences, metav1.OwnerReference{
+			APIVersion:         "apps/v1",
+			Kind:               "Deployment",
+			Name:               operatorDep.Name,
+			UID:                operatorDep.UID,
+			BlockOwnerDeletion: nil, // Avoids requiring update/patch permissions on deployment finalizers
+			Controller:         &isController,
+		})
+	}
+	return nil
 }
 
 // Helper functions for safe TC handle resolution
@@ -225,7 +286,7 @@ func resolveClassHandle(rootHandle int, classID string, classMinor int) string {
 }
 
 // cleanupNodeTrafficControl issues DELETE requests to agent pods to flush host qdiscs and filters
-func (r *VlanTrafficControlReconciler) cleanupNodeTrafficControl(ctx context.Context, instance *networkingv1alpha1.VlanTrafficControl, namespace string) error {
+func (r *VlanTrafficControlReconciler) cleanupNodeTrafficControl(ctx context.Context, instance *v1alpha1.VlanTrafficControl, namespace string) error {
 	logger := log.FromContext(ctx)
 
 	var podList corev1.PodList
@@ -261,15 +322,13 @@ func (r *VlanTrafficControlReconciler) cleanupNodeTrafficControl(ctx context.Con
 }
 
 func getAgentImage() string {
-	// First choice: Environment variable passed by OLM/CSV
 	if img := os.Getenv("RELATED_IMAGE_AGENT"); img != "" {
 		return img
 	}
-	// Fallback choice: Use dedicated agent image repository
-	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.41"
+	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.50"
 }
 
-func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(instance *networkingv1alpha1.VlanTrafficControl, namespace, specHash string) *appsv1.DaemonSet {
+func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(instance *v1alpha1.VlanTrafficControl, namespace, specHash string) *appsv1.DaemonSet {
 	privilegedVal := true
 	hostPathDir := corev1.HostPathDirectory
 
@@ -357,7 +416,7 @@ func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(instance *networkingv
 	}
 }
 
-func (r *VlanTrafficControlReconciler) collectAgentPerformanceStats(ctx context.Context, instance *networkingv1alpha1.VlanTrafficControl, namespace string) {
+func (r *VlanTrafficControlReconciler) collectAgentPerformanceStats(ctx context.Context, instance *v1alpha1.VlanTrafficControl, namespace string) {
 	logger := log.FromContext(ctx)
 
 	var podList corev1.PodList
@@ -381,9 +440,9 @@ func (r *VlanTrafficControlReconciler) collectAgentPerformanceStats(ctx context.
 		}
 
 		var statsData struct {
-			Node         string                        `json:"node"`
-			ClassStats   []executor.ClassStats         `json:"classStats"`
-			IngressStats []executor.IngressFilterStats `json:"ingressStats"`
+			Node         string                 `json:"node"`
+			ClassStats   []v1alpha1.ClassStat   `json:"classStats"`
+			IngressStats []v1alpha1.IngressStat `json:"ingressStats"`
 		}
 
 		if err := json.NewDecoder(resp.Body).Decode(&statsData); err == nil {
@@ -393,7 +452,7 @@ func (r *VlanTrafficControlReconciler) collectAgentPerformanceStats(ctx context.
 	}
 }
 
-func (r *VlanTrafficControlReconciler) updateStatusCondition(instance *networkingv1alpha1.VlanTrafficControl, conditionType string, status metav1.ConditionStatus, reason, message string) {
+func (r *VlanTrafficControlReconciler) updateStatusCondition(instance *v1alpha1.VlanTrafficControl, conditionType string, status metav1.ConditionStatus, reason, message string) {
 	meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
 		Type:               conditionType,
 		Status:             status,
@@ -406,7 +465,7 @@ func (r *VlanTrafficControlReconciler) updateStatusCondition(instance *networkin
 
 func (r *VlanTrafficControlReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&networkingv1alpha1.VlanTrafficControl{}).
+		For(&v1alpha1.VlanTrafficControl{}).
 		Owns(&appsv1.DaemonSet{}).
 		Complete(r)
 }

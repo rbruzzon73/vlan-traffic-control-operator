@@ -1,4 +1,4 @@
-# Solution Overview & Technical Architecture
+# VLAN Traffic Control Operator - Solution Overview & Technical Architecture
 
 **VLAN Traffic Control Operator** delivers fine-grained, declarative Quality of Service (QoS) and host-level network traffic shaping for OpenShift/Kubernetes clusters.
 
@@ -444,7 +444,7 @@ The diagram below illustrates how `br-vlan100` switches traffic internally and w
 |                                      | [VM OUTBOUND / HOST INBOUND]               |
 |                                      v                                            |
 |  +-----------------------------------------------------------------------------+  |
-|  | LINUX BRIDGE: br-vlan100  [vlan_filtering=1]                               |  |
+|  | LINUX BRIDGE: br-vlan100  [vlan_filtering=1]                                |  |
 |  |                                                                             |  |
 |  |   +---------------------------------------------------------------------+   |  |
 |  |   | Port: veth1af88ce5 (VM Tap Port)                                    |   |  |
@@ -848,10 +848,355 @@ class htb 1:100 parent 1:1 leaf 100: prio 1 rate 50Mbit ceil 10Gbit burst 15Kb c
 
 ---
 
-## OpenShift Cluster Metrics & Ingress Filter Observability (PENDING)
+## OpenShift Cluster Metrics & Ingress Filter Observability
 
-This section details how the `vlan-traffic-control-agent` DaemonSet collects real-time Traffic Control (TC) telemetry across all OpenShift worker nodes, exposes structured egress and ingress bandwidth metrics, and maps kernel netlink filter stats directly back to `VlanTrafficControl` Custom Resources.
+This section details how the `vlan-traffic-control-agent` DaemonSet collects real-time Traffic Control (TC) telemetry across all OpenShift worker nodes, exposes structured egress (including HTB priority levels, default class statistics, and bandwidth borrowing) and ingress bandwidth metrics, and maps kernel netlink filter stats directly back to `VlanTrafficControl` Custom Resources.
 
+---
+
+### Key Capabilities
+
+* **Native Netlink Engine:** Replaces shell subprocess calls with direct kernel socket inspection (`vishvananda/netlink`) for high-performance telemetry collection without CLI execution overhead.
+* **Unified Telemetry Schema:** Merges egress bandwidth queue statistics (`prio`, `bytes`, `packets`, `overlimits`, `borrowed`) and ingress rate-policing drop counters (`bytes`, `packets`, `drops`) into a single API payload.
+* **Default Class Telemetry:** Automatically reports metrics for the default fallback class (e.g. `1:99` / `default-fallback`), capturing unclassified host traffic.
+* **HTB Priority & Borrowing Tracking:** Surfaces class priority (`prio`) and `borrowed` token counters when a class exceeds its guaranteed `rate` and consumes spare root capacity up to its `ceil`.
+* **CRD Metadata Mapping:** Automatically correlates kernel handles (`classId` `1:100`, `filterId` `pref 100`) with custom human-readable class names defined in the `VlanTrafficControl` CRD.
+* **Granular Filtering:** Supports target filtering by specific **VLAN Tag ID** (`?vlan=100`) or **TC Class Handle** (`?classId=1:100`) to isolate specific tenant or application traffic.
+
+---
+
+### Agent Observability Endpoints
+
+Each agent pod exposes an HTTP telemetry interface on port `8080`:
+
+| Endpoint | Method | Query Parameters | Description |
+| :--- | :--- | :--- | :--- |
+| `/stats` | `GET` | `interface` *(required)*, `vlan` *(optional)*, `classId` *(optional)* | Fetches structured egress (with prio, default class & borrowing) and ingress TC metrics via Netlink sockets. |
+| `/reconcile` | `POST` | *None* | Triggers an immediate local TC rule reconciliation pass on the node. |
+| `/cleanup` | `DELETE` / `POST` | `interface` *(required)* | Flushes root HTB and ingress policing qdiscs on the node. |
+| `/healthz` | `GET` | *None* | Liveness probe endpoint. |
+
+---
+
+### Querying Telemetry
+
+#### 1. Query All Worker Node Telemetry (via Operator Manager)
+Run this command from inside the cluster manager pod to inspect telemetry across all worker nodes:
+
+```bash
+for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+  oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+    curl -s "http://${pod_ip}:8080/stats?interface=enp1s0" | jq .
+done
+```
+
+#### 2. Query Single VLAN or TC Rule
+Isolate telemetry for a specific VLAN ID (e.g., VLAN 100) or class ID (e.g., `1:100`):
+
+```bash
+# Filter stats for VLAN 100
+curl -s "http://${agent_pod_ip}:8080/stats?interface=enp1s0&vlan=100" | jq .
+
+# Filter stats by Class ID handle
+curl -s "http://${agent_pod_ip}:8080/stats?interface=enp1s0&classId=1:100" | jq .
+```
+
+---
+
+### Sample Telemetry Payload (`/stats`)
+
+```json
+{
+  "interface": "enp1s0",
+  "node": "hub-worker03.ocp4-hub.test.com",
+  "classStats": [
+    {
+      "classId": "1:99",
+      "name": "default-fallback",
+      "prio": 0,
+      "bytes": 54210,
+      "packets": 412,
+      "overlimits": 0,
+      "borrowed": 0
+    },
+    {
+      "classId": "1:100",
+      "name": "storage-vlan-100",
+      "prio": 1,
+      "bytes": 109802,
+      "packets": 1279,
+      "overlimits": 0,
+      "borrowed": 42
+    }
+  ],
+  "ingressStats": [
+    {
+      "classId": "1:100",
+      "filterId": "pref 100",
+      "bytes": 842100,
+      "packets": 5930,
+      "drops": 0
+    }
+  ]
+}
+```
+
+---
+
+yes !
+
+Here is the updated Node Configuration & Alignment Engine section for your README.md, now updated to include the missing host interface drift scenario alongside the fully aligned state example.
+
+Markdown
+## Node Configuration & Alignment Engine
+
+This section details how the `vlan-traffic-control-agent` DaemonSet performs real-time drift detection and configuration auditing across OpenShift worker nodes. By comparing live kernel qdisc, class, and filter states retrieved via Netlink sockets (`vishvananda/netlink`) against the aggregated target specifications from `VlanTrafficControl` Custom Resources, the engine provides immediate visibility into node configuration alignment and pinpoints specific parameter discrepancies.
+
+---
+
+### Key Capabilities
+
+* **Deterministic Drift Analysis:** Computes a strict boolean alignment state (`isAligned: true|false`) by matching live kernel socket parameters against the expected CRD specification matrix.
+* **Missing Host Interface Detection:** Automatically flags targeted network interfaces (`br-vlan100`, `enp1s0.100`) that are absent on specific worker nodes, generating clear drift deltas rather than crashing or returning false positives.
+* **Polymorphic Filter Evaluation:** Dynamically evaluates all active kernel classifier types (`Flower`, `U32`, `fw` skb-mark filters, and `GenericFilter`) via Netlink priority handles to eliminate false-negative drift reports when matching skb marks vs VLAN IDs.
+* **Filter Engine Transparency:** Reports the exact kernel classifier module (`fw`, `flower`, `u32`) and protocol ID fulfilling each active ingress policy (`ingressFilters`).
+* **Qdisc Existence Audit:** Verifies the presence of both the root HTB qdisc (`1:`) and ingress policing qdisc (`ffff:`) on the target host interface (`htbQdiscPresent`, `ingressPresent`).
+* **Delta Discrepancy Reporting:** Returns a detailed list of configuration deltas (`driftDeltas`) identifying missing host devices, missing egress classes, orphan qdiscs, missing ingress policing filters, or mismatched TC priorities (`priority`).
+* **Multi-CRD Spec Aggregation:** Dynamically merges all active `VlanTrafficControl` resources targeting a given node interface based on `nodeSelector` matching.
+* **Targeted Partial Auditing:** Supports querying alignment for a single class handle (`?classId=1:380`) or VLAN ID to isolate tenant configuration drift without auditing the entire interface hierarchy.
+* **Non-Disruptive Inspection:** Evaluates alignment in-memory using lightweight Netlink socket calls without mutating existing kernel TC structures or blocking data-path traffic.
+
+---
+
+### Alignment Engine Endpoint (`/config`)
+
+The agent pod exposes the following HTTP configuration auditing interface on port `8080`:
+
+| Endpoint | Method | Query Parameters | Description |
+| :--- | :--- | :--- | :--- |
+| `/config` | `GET` | `interface` *(required)*, `classId` *(optional)* | Audits live host kernel TC state against desired CRD specifications and returns a structured drift report. |
+
+---
+
+### Auditing Configuration Alignment
+
+#### 1. Audit Full Node Configuration Alignment Across Worker Cluster
+Run this command from inside the cluster manager pod to check alignment across all worker nodes:
+
+```bash
+for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+  oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+    curl -s "http://${pod_ip}:8080/config?interface=enp1s0" | jq .
+done
+```
+
+#### 2. Audit Single VLAN or TC Rule Alignment
+Isolate alignment status for a specific class ID handle (e.g., `1:380` / VLAN 380):
+
+```bash
+# Audit alignment for TC Class 1:380
+curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:380" | jq .
+```
+
+---
+
+### Sample Configuration Alignment Payload (`/config`)
+
+#### 1. Fully Aligned State Example:
+
+```json
+{
+  "node": "hub-worker01.ocp4-hub.test.com",
+  "interface": "enp1s0",
+  "isAligned": true,
+  "desired": {
+    "interface": "enp1s0",
+    "rate": "10Gbit",
+    "classes": [
+      {
+        "name": "ovs-marked-flow",
+        "classId": "1:380",
+        "matchType": "mark",
+        "mark": 16,
+        "egressRate": "500Mbit",
+        "egressCeil": "500Mbit",
+        "egressBurst": "50k",
+        "ingressRate": "100Mbit",
+        "ingressBurst": "20k",
+        "priority": 3,
+        "enableFqCodel": true
+      },
+      {
+        "name": "raw-htb-no-fqcodel",
+        "classId": "1:400",
+        "matchType": "auto",
+        "vlanId": 400,
+        "egressRate": "1Gbit",
+        "egressCeil": "2Gbit",
+        "ingressRate": "500Mbit",
+        "priority": 4,
+        "enableFqCodel": false
+      }
+    ]
+  },
+  "actual": {
+    "htbQdiscPresent": true,
+    "ingressPresent": true,
+    "classes": [
+      { "classId": "1:99" },
+      { "classId": "1:1" },
+      { "classId": "1:380", "priority": 3 },
+      { "classId": "1:400", "priority": 4 }
+    ],
+    "ingressFilters": [
+      {
+        "priority": 3,
+        "type": "fw",
+        "protocol": 3
+      },
+      {
+        "priority": 4,
+        "type": "flower",
+        "protocol": 33024
+      }
+    ]
+  },
+  "driftDeltas": []
+}
+```
+#### 2. Misaligned State - Missing Host Interface (`br-vlan100` absent on worker):
+
+```json
+{
+  "node": "hub-worker01.ocp4-hub.test.com",
+  "interface": "br-vlan100",
+  "isAligned": false,
+  "desired": {
+    "interface": "br-vlan100",
+    "rate": "10Gbit",
+    "classes": [
+      {
+        "name": "storage-vlan-100",
+        "classId": "1:100",
+        "matchType": "subnet",
+        "subnet": "10.0.100.0/24",
+        "egressRate": "50Mbit",
+        "egressCeil": "10Gbit",
+        "ingressRate": "30Mbit",
+        "priority": 1,
+        "enableFqCodel": true
+      }
+    ]
+  },
+  "actual": {
+    "htbQdiscPresent": false,
+    "ingressPresent": false,
+    "classes": [],
+    "ingressFilters": []
+  },
+  "driftDeltas": [
+    {
+      "targetHandle": "interface br-vlan100",
+      "property": "existence",
+      "expected": "present on host",
+      "actual": "missing device"
+    },
+    {
+      "targetHandle": "class 1:100",
+      "property": "existence",
+      "expected": "configured",
+      "actual": "missing (interface br-vlan100 absent)"
+    }
+  ]
+}
+```
+---
+
+### Understanding Alignment Drift Statuses (`driftDeltas`)
+
+When a node is misaligned (`isAligned: false`), the `driftDeltas` array provides a granular audit log breaking down the exact mismatch between the `VlanTrafficControl` CRD specification and the live Linux kernel Netlink state.
+
+Each entry in `driftDeltas` follows a structured 4-field schema:
+
+```json
+{
+  "targetHandle": "interface br-vlan100",
+  "property": "existence",
+  "expected": "present on host",
+  "actual": "missing device"
+}
+```
+
+* **`targetHandle`**: Identifies the specific host interface, TC class ID, or filter handle being evaluated.
+* **`property`**: The exact parameter or state check under inspection (`existence`, `priority`, `rate`, `ceil`).
+* **`expected`**: The state or value dictated by the `VlanTrafficControl` CRD specification.
+* **`actual`**: The live state or value retrieved directly from the kernel Netlink socket.
+
+---
+
+### Reference Matrix: Drift Delta Combinations & Causes
+
+The table below describes all possible status combinations emitted by the alignment engine during cluster audits:
+
+#### 1. Interface & Qdisc Existence Errors
+
+| Target Handle | Property | Expected | Actual | Description & Root Cause |
+| :--- | :--- | :--- | :--- | :--- |
+| `interface <iface>` | `existence` | `present on host` | `missing device` | Netlink returned `LinkNotFoundError`. The host network bridge or sub-interface does not exist on this worker node. |
+| `qdisc root` | `existence` | `htb` | `missing` | The HTB root qdisc (`1:`) is missing from the interface on the host. |
+| `qdisc ingress` | `existence` | `ingress` | `missing` | The ingress policing qdisc (`ffff:`) was flushed or omitted on the target host interface. |
+
+#### 2. Egress HTB Class Errors
+
+| Target Handle | Property | Expected | Actual | Description & Root Cause |
+| :--- | :--- | :--- | :--- | :--- |
+| `class <handle>` *(e.g. `class 1:100`)* | `existence` | `configured` | `missing` | The egress HTB class handle exists in the CRD spec but was not created in the kernel. |
+| `class <handle>` | `existence` | `configured` | `missing (interface <iface> absent)` | Cascading failure reported when an HTB class cannot be verified because the host interface itself is absent. |
+| `class <handle>` | `priority` | `<expected_prio>` *(e.g. `1`)* | `<actual_prio>` *(e.g. `3`)* | The class exists in the kernel, but its priority (`prio`) diverges from the CRD spec. |
+| `class <handle>` | `rate` | `<expected_rate>` *(e.g. `50Mbit`)* | `<actual_rate>` *(e.g. `10Mbit`)* | The configured egress committed rate differs from the live Netlink state. |
+| `class <handle>` | `ceil` | `<expected_ceil>` *(e.g. `10Gbit`)* | `<actual_ceil>` *(e.g. `1Gbit`)* | The configured maximum ceiling rate differs from the live Netlink state. |
+
+#### 3. Ingress Filter & Classifier Errors
+
+| Target Handle | Property | Expected | Actual | Description & Root Cause |
+| :--- | :--- | :--- | :--- | :--- |
+| `ingress filter pref <prio>` *(e.g. `pref 3`)* | `existence` | `configured` | `missing` | The ingress policing filter (`fw`, `flower`, or `u32`) associated with this priority handle is missing. |
+| `egress filter pref <prio>` | `existence` | `configured` | `missing` | The egress classifier steering traffic into the HTB class handle is missing in the kernel. |
+| `ingress filter pref <prio>` | `rate` | `<expected_police>` *(e.g. `30Mbit`)* | `<actual_police>` *(e.g. `10Mbit`)* | The policing action drop threshold in the kernel does not match the CRD `ingressRate`. |
+
+---
+
+### Recommended Remediation Actions
+
+1. **If an interface is localized (not present on all workers):**  
+   Restrict the CRD `nodeSelector` so the operator targets only nodes where the physical interface or bridge is provisioned:
+
+```yaml
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/storage-node: ""
+```
+
+2. **If an interface should exist cluster-wide:**  
+   Inspect your OpenShift **NMState** or **NodeNetworkConfigurationPolicy (NNCP)** manifests to bring up the missing interface across all worker nodes.
+
+3. **If a class/filter is missing on an active interface:**  
+   Trigger an instant agent re-reconciliation to re-apply the desired Linux kernel TC qdiscs and filters without waiting for the periodic reconcile loop:
+
+   * **Trigger Re-reconciliation across ALL Agent Pods in the Cluster:**
+     ```bash
+     for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+       echo "Triggering reconcile on Agent IP: ${pod_ip}"
+       oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+         curl -s -X POST "http://${pod_ip}:8080/reconcile?interface=enp1s0" | jq .
+     done
+     ```
+
+   * **Trigger Re-reconciliation on a Specific Node/Agent:**
+     ```bash
+     # Optionally specify ?interface=<iface> to target a single interface rebuild
+     curl -X POST "http://${agent_pod_ip}:8080/reconcile?interface=enp1s0"
+     ```
 ---
 
 ## Troubleshooting & Error Code Analysis
@@ -884,7 +1229,7 @@ When bandwidth shaping or ingress policing fails to apply, follow this diagnosti
             |
             v
 +-------------------------------------------------------------+
-| 3. Direct Host Kernel Verification                           |
+| 3. Direct Host Kernel Verification                          |
 |    oc debug node/<node> -- chroot /host tc -s qdisc show ...|
 +-------------------------------------------------------------+
 ```

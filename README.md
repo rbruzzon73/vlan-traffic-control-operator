@@ -1110,7 +1110,93 @@ curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:380" | jq
   ]
 }
 ```
+---
 
+### Understanding Alignment Drift Statuses (`driftDeltas`)
+
+When a node is misaligned (`isAligned: false`), the `driftDeltas` array provides a granular audit log breaking down the exact mismatch between the `VlanTrafficControl` CRD specification and the live Linux kernel Netlink state.
+
+Each entry in `driftDeltas` follows a structured 4-field schema:
+
+```json
+{
+  "targetHandle": "interface br-vlan100",
+  "property": "existence",
+  "expected": "present on host",
+  "actual": "missing device"
+}
+```
+
+* **`targetHandle`**: Identifies the specific host interface, TC class ID, or filter handle being evaluated.
+* **`property`**: The exact parameter or state check under inspection (`existence`, `priority`, `rate`, `ceil`).
+* **`expected`**: The state or value dictated by the `VlanTrafficControl` CRD specification.
+* **`actual`**: The live state or value retrieved directly from the kernel Netlink socket.
+
+---
+
+### Reference Matrix: Drift Delta Combinations & Causes
+
+The table below describes all possible status combinations emitted by the alignment engine during cluster audits:
+
+#### 1. Interface & Qdisc Existence Errors
+
+| Target Handle | Property | Expected | Actual | Description & Root Cause |
+| :--- | :--- | :--- | :--- | :--- |
+| `interface <iface>` | `existence` | `present on host` | `missing device` | Netlink returned `LinkNotFoundError`. The host network bridge or sub-interface does not exist on this worker node. |
+| `qdisc root` | `existence` | `htb` | `missing` | The HTB root qdisc (`1:`) is missing from the interface on the host. |
+| `qdisc ingress` | `existence` | `ingress` | `missing` | The ingress policing qdisc (`ffff:`) was flushed or omitted on the target host interface. |
+
+#### 2. Egress HTB Class Errors
+
+| Target Handle | Property | Expected | Actual | Description & Root Cause |
+| :--- | :--- | :--- | :--- | :--- |
+| `class <handle>` *(e.g. `class 1:100`)* | `existence` | `configured` | `missing` | The egress HTB class handle exists in the CRD spec but was not created in the kernel. |
+| `class <handle>` | `existence` | `configured` | `missing (interface <iface> absent)` | Cascading failure reported when an HTB class cannot be verified because the host interface itself is absent. |
+| `class <handle>` | `priority` | `<expected_prio>` *(e.g. `1`)* | `<actual_prio>` *(e.g. `3`)* | The class exists in the kernel, but its priority (`prio`) diverges from the CRD spec. |
+| `class <handle>` | `rate` | `<expected_rate>` *(e.g. `50Mbit`)* | `<actual_rate>` *(e.g. `10Mbit`)* | The configured egress committed rate differs from the live Netlink state. |
+| `class <handle>` | `ceil` | `<expected_ceil>` *(e.g. `10Gbit`)* | `<actual_ceil>` *(e.g. `1Gbit`)* | The configured maximum ceiling rate differs from the live Netlink state. |
+
+#### 3. Ingress Filter & Classifier Errors
+
+| Target Handle | Property | Expected | Actual | Description & Root Cause |
+| :--- | :--- | :--- | :--- | :--- |
+| `ingress filter pref <prio>` *(e.g. `pref 3`)* | `existence` | `configured` | `missing` | The ingress policing filter (`fw`, `flower`, or `u32`) associated with this priority handle is missing. |
+| `egress filter pref <prio>` | `existence` | `configured` | `missing` | The egress classifier steering traffic into the HTB class handle is missing in the kernel. |
+| `ingress filter pref <prio>` | `rate` | `<expected_police>` *(e.g. `30Mbit`)* | `<actual_police>` *(e.g. `10Mbit`)* | The policing action drop threshold in the kernel does not match the CRD `ingressRate`. |
+
+---
+
+### Recommended Remediation Actions
+
+1. **If an interface is localized (not present on all workers):**  
+   Restrict the CRD `nodeSelector` so the operator targets only nodes where the physical interface or bridge is provisioned:
+
+```yaml
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/storage-node: ""
+```
+
+2. **If an interface should exist cluster-wide:**  
+   Inspect your OpenShift **NMState** or **NodeNetworkConfigurationPolicy (NNCP)** manifests to bring up the missing interface across all worker nodes.
+
+3. **If a class/filter is missing on an active interface:**  
+   Trigger an instant agent re-reconciliation to re-apply the desired Linux kernel TC qdiscs and filters without waiting for the periodic reconcile loop:
+
+   * **Trigger Re-reconciliation across ALL Agent Pods in the Cluster:**
+     ```bash
+     for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+       echo "Triggering reconcile on Agent IP: ${pod_ip}"
+       oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+         curl -s -X POST "http://${pod_ip}:8080/reconcile?interface=enp1s0" | jq .
+     done
+     ```
+
+   * **Trigger Re-reconciliation on a Specific Node/Agent:**
+     ```bash
+     # Optionally specify ?interface=<iface> to target a single interface rebuild
+     curl -X POST "http://${agent_pod_ip}:8080/reconcile?interface=enp1s0"
+     ```
 ---
 
 ## Troubleshooting & Error Code Analysis

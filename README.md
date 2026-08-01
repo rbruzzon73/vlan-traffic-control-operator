@@ -848,9 +848,98 @@ class htb 1:100 parent 1:1 leaf 100: prio 1 rate 50Mbit ceil 10Gbit burst 15Kb c
 
 ---
 
-## OpenShift Cluster Metrics & Ingress Filter Observability (PENDING)
+## OpenShift Cluster Metrics & Ingress Filter Observability
 
-This section details how the `vlan-traffic-control-agent` DaemonSet collects real-time Traffic Control (TC) telemetry across all OpenShift worker nodes, exposes structured egress and ingress bandwidth metrics, and maps kernel netlink filter stats directly back to `VlanTrafficControl` Custom Resources.
+This section details how the `vlan-traffic-control-agent` DaemonSet collects real-time Traffic Control (TC) telemetry across all OpenShift worker nodes, exposes structured egress (including HTB priority levels, default class statistics, and bandwidth borrowing) and ingress bandwidth metrics, and maps kernel netlink filter stats directly back to `VlanTrafficControl` Custom Resources.
+
+---
+
+### Key Capabilities
+
+* **Native Netlink Engine:** Replaces shell subprocess calls with direct kernel socket inspection (`vishvananda/netlink`) for high-performance telemetry collection without CLI execution overhead.
+* **Unified Telemetry Schema:** Merges egress bandwidth queue statistics (`prio`, `bytes`, `packets`, `overlimits`, `borrowed`) and ingress rate-policing drop counters (`bytes`, `packets`, `drops`) into a single API payload.
+* **Default Class Telemetry:** Automatically reports metrics for the default fallback class (e.g. `1:99` / `default-fallback`), capturing unclassified host traffic.
+* **HTB Priority & Borrowing Tracking:** Surfaces class priority (`prio`) and `borrowed` token counters when a class exceeds its guaranteed `rate` and consumes spare root capacity up to its `ceil`.
+* **CRD Metadata Mapping:** Automatically correlates kernel handles (`classId` `1:100`, `filterId` `pref 100`) with custom human-readable class names defined in the `VlanTrafficControl` CRD.
+* **Granular Filtering:** Supports target filtering by specific **VLAN Tag ID** (`?vlan=100`) or **TC Class Handle** (`?classId=1:100`) to isolate specific tenant or application traffic.
+
+---
+
+### Agent Observability Endpoints
+
+Each agent pod exposes an HTTP telemetry interface on port `8080`:
+
+| Endpoint | Method | Query Parameters | Description |
+| :--- | :--- | :--- | :--- |
+| `/stats` | `GET` | `interface` *(required)*, `vlan` *(optional)*, `classId` *(optional)* | Fetches structured egress (with prio, default class & borrowing) and ingress TC metrics via Netlink sockets. |
+| `/reconcile` | `POST` | *None* | Triggers an immediate local TC rule reconciliation pass on the node. |
+| `/cleanup` | `DELETE` / `POST` | `interface` *(required)* | Flushes root HTB and ingress policing qdiscs on the node. |
+| `/healthz` | `GET` | *None* | Liveness probe endpoint. |
+
+---
+
+### Querying Telemetry
+
+#### 1. Query All Worker Node Telemetry (via Operator Manager)
+Run this command from inside the cluster manager pod to inspect telemetry across all worker nodes:
+
+\`\`\`bash
+for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+  oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+    curl -s "http://${pod_ip}:8080/stats?interface=enp1s0" | jq .
+done
+\`\`\`
+
+#### 2. Query Single VLAN or TC Rule
+Isolate telemetry for a specific VLAN ID (e.g., VLAN 100) or class ID (e.g., `1:100`):
+
+\`\`\`bash
+# Filter stats for VLAN 100
+curl -s "http://${agent_pod_ip}:8080/stats?interface=enp1s0&vlan=100" | jq .
+
+# Filter stats by Class ID handle
+curl -s "http://${agent_pod_ip}:8080/stats?interface=enp1s0&classId=1:100" | jq .
+\`\`\`
+
+---
+
+### Sample Telemetry Payload (`/stats`)
+
+\`\`\`json
+{
+  "interface": "enp1s0",
+  "node": "hub-worker03.ocp4-hub.test.com",
+  "classStats": [
+    {
+      "classId": "1:99",
+      "name": "default-fallback",
+      "prio": 0,
+      "bytes": 54210,
+      "packets": 412,
+      "overlimits": 0,
+      "borrowed": 0
+    },
+    {
+      "classId": "1:100",
+      "name": "storage-vlan-100",
+      "prio": 1,
+      "bytes": 109802,
+      "packets": 1279,
+      "overlimits": 0,
+      "borrowed": 42
+    }
+  ],
+  "ingressStats": [
+    {
+      "classId": "1:100",
+      "filterId": "pref 100",
+      "bytes": 842100,
+      "packets": 5930,
+      "drops": 0
+    }
+  ]
+}
+\`\`\`
 
 ---
 

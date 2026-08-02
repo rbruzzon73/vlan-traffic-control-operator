@@ -199,16 +199,26 @@ Traffic identification goes beyond standard 802.1Q VLAN tags. The operator suppo
 
 ## Custom Resource Definition (CRD) Reference
 
-The `VlanTrafficControl` Custom Resource (`networking.med.io/vlan-traffic-control`) defines the desired traffic shaping state.
+The `VlanTrafficControl` Custom Resource (`networking.med.io/vlan-traffic-control`) defines the desired traffic shaping state, target nodes, and pod scheduling tolerations.
 
 ### `VlanTrafficControlSpec` (`spec`)
 
 | Field | Type | Required | Default | Description |
 | :--- | :--- | :---: | :---: | :--- |
-| `nodeSelector` | `map[string]string` | No | `{}` | Map of node labels used to select target worker nodes (e.g., `node-role.kubernetes.io/worker: ""`). |
+| `nodeSelector` | `map[string]string` | No | `{}` | Map of node labels used to select target worker or infrastructure nodes (e.g., `node-role.kubernetes.io/worker: ""`). |
+| `tolerations` | `[]Toleration` | No | `[]` | List of Kubernetes pod/daemonset tolerations allowing the agent to run on tainted nodes (e.g., master/control-plane or dedicated infra taints). |
 | `reconcileIntervalSeconds` | `integer` | No | `30` | Interval in seconds between node agent reconciliation loops. |
 | `tcStrategy` | `string` | **Yes** | `"flower"` | Default traffic control strategy execution mode. Valid values: `flower`, `u32`, `auto`. |
 | `htbRoot` | `HtbRootSpec` | **Yes** | — | Root HTB and interface configuration. |
+
+### Node Targeting & Taint Tolerations
+
+The operator provides granular control over which nodes in the cluster receive traffic control rules:
+
+* **`nodeSelector` Label Matching:** Restricts policy enforcement strictly to worker nodes matching specified key-value labels. If left empty (`{}`), all accessible nodes are evaluated.
+* **`tolerations` Support:** Allows the host agent to schedule and execute on tainted nodes, such as master nodes (`node-role.kubernetes.io/master:NoSchedule`), control-plane nodes (`node-role.kubernetes.io/control-plane:NoSchedule`), or dedicated edge/storage infrastructure nodes. Standard Kubernetes toleration fields (`key`, `operator`, `value`, `effect`, `tolerationSeconds`) are supported.
+
+---
 
 ### `HtbRootSpec` (`spec.htbRoot`)
 
@@ -263,8 +273,23 @@ metadata:
   name: vlan-tc-workers
   namespace: openshift-vlan-tc-operator
 spec:
+  # Target specific worker nodes via label matching
   nodeSelector:
     node-role.kubernetes.io/worker: ""
+  
+  # Tolerations allowing host agent execution on master/control-plane nodes
+  tolerations:
+    - key: "node-role.kubernetes.io/master"
+      operator: "Exists"
+      effect: "NoSchedule"
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+    - key: "node.kubernetes.io/unreachable"
+      operator: "Exists"
+      effect: "NoExecute"
+      tolerationSeconds: 600
+
   reconcileIntervalSeconds: 60
   tcStrategy: "flower"
   htbRoot:

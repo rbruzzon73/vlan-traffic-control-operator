@@ -159,9 +159,9 @@ This component queries the Linux kernel to retrieve real-time traffic shaping me
 │
 ▼
 [ Host Node Agent (cmd/agent) ]
-  ├── 1. Modules Loader (pkg/executor/modules.go) ──> Loads sch_htb, cls_flower, cls_fw
-  ├── 2. Classifier Resolver (ResolveClassifier)  ──> Maps vlan/subnet/mark criteria
-  ├── 3. TC Engine (pkg/executor/tc.go)           ──> Executes chroot /host tc commands
+  ├── 1. Modules Loader (pkg/executor/modules.go)  ──> Loads sch_htb, cls_flower, cls_fw
+  ├── 2. Classifier Resolver (ResolveClassifier)   ──> Maps vlan/subnet/mark criteria
+  ├── 3. TC Engine (pkg/executor/tc.go)            ──> Executes chroot /host tc commands
   └── 4. Stats Collector (htb_executor.go)         ──> Exposes /stats JSON metrics
   ```
 

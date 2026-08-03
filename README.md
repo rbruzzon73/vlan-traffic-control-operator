@@ -1330,6 +1330,11 @@ oc logs -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent --tail=1
 
 ## Basic test run results
 
+Notes:
+   - DaemonSet Spec Hash Change: a DaemonSet relies on a single workload template (.spec.template). Editing this specification (such as adding a toleration for master node scheduling) causes the cluster to update the underlying PodTemplateSpec generation hash.
+   - Rolling Update Strategy: The controller identifies that every running pod configuration no longer matches the newly generated PodTemplateSpec. Even if a worker node pod remains functionally unaffected by the new toleration, the corresponding spec hash is marked as outdated.
+   - Sequential Rollout: A rolling restart is triggered across every node in the cluster. Pods are terminated and recreated one node at a time—beginning on control plane nodes and continuing sequentially across worker nodes—until every instance aligns with the updated template version.
+
 ### Selector & Toleration Verification Suite [ PASSED ✅ ]
 
 ```bash

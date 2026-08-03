@@ -4,6 +4,14 @@ metadata:
   name: vlan-traffic-control-agent-role
 rules:
   - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
       - networking.med.io
     resources:
       - vlantrafficcontrols

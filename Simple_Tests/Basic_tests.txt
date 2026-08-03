@@ -1,0 +1,121 @@
+================================================================================
+VLAN TRAFFIC CONTROL OPERATOR - AUTOMATED TEST SUITES DOCUMENTATION
+================================================================================
+
+OVERVIEW
+--------
+This document describes the two automated Bash test suites designed to validate 
+the core functionalities of the VLAN Traffic Control Operator:
+1. Multi-Node Targeting & Deletion Sequence Suite (test-tc-targeting-sequence.sh)
+2. Capability & Selector Verification Suite (test-selectors-and-tolerations.sh)
+
+Both scripts perform dual-layer verification at each execution step:
+- Layer 1 (API/Agent): Queries the local agent pods via HTTP GET /stats.
+- Layer 2 (Linux Kernel): Executes 'oc debug node' to inspect the actual 
+  host network namespace via 'tc class show dev enp1s0.100'.
+
+
+================================================================================
+1. MULTI-NODE TARGETING & DELETION SEQUENCE SUITE
+   File: test-tc-targeting-sequence.sh
+================================================================================
+
+PURPOSE
+-------
+Executes a 9-step state machine lifecycle test on the primary VLAN interface 
+(enp1s0.100). It validates multi-policy aggregation, role-based node targeting, 
+and selective interface cleanup (flushing) during CR deletions or scope updates.
+
+STEP-BY-STEP SEQUENCE & EXPECTED RESULTS
+----------------------------------------
+
+Step 1: First TC rule added to ALL nodes
+  - Action: Apply 'rule-all-1' with no node restrictions.
+  - Expected State: 1 active class on Workers | 1 active class on Masters.
+
+Step 2: Second TC rule added to ALL nodes
+  - Action: Apply 'rule-all-2' using NodeLabelSelector.matchLabels targeting all.
+  - Expected State: 2 active classes on Workers | 2 active classes on Masters.
+
+Step 3: Third TC rule added to MASTER nodes only
+  - Action: Apply 'rule-master-3' with nodeSelector and tolerations for Masters.
+  - Expected State: 2 active classes on Workers | 3 active classes on Masters.
+
+Step 4: First TC rule removed from WORKER nodes only
+  - Action: Update 'rule-all-1' nodeSelector to target Master nodes exclusively.
+  - Expected State: 1 active class on Workers | 2 active classes on Masters.
+
+Step 5: Second TC rule removed from WORKER nodes only
+  - Action: Update 'rule-all-2' nodeLabelSelector to target Master nodes exclusively.
+  - Expected State: 0 active classes on Workers (Interface Flushed) | 1 active class on Masters.
+  - Kernel Verification: Confirm root HTB qdisc ('1:') is deleted on Worker nodes.
+
+Step 6: First TC rule re-added to ALL nodes
+  - Action: Re-apply 'rule-all-1' targeting all nodes.
+  - Expected State: 1 active class on Workers | 2 active classes on Masters.
+
+Step 7: Second TC rule re-added to ALL nodes
+  - Action: Re-apply 'rule-all-2' targeting all nodes.
+  - Expected State: 2 active classes on Workers | 3 active classes on Masters.
+
+Step 8: Third TC rule added to WORKER nodes only
+  - Action: Apply 'rule-worker-3' using NodeLabelSelector.matchExpressions (Exists).
+  - Expected State: 3 active classes on Workers | 3 active classes on Masters.
+
+Step 9: All TC rules removed from MASTER nodes
+  - Action: Delete 'rule-master-3' and restrict 'rule-all-1'/'rule-all-2' to Workers.
+  - Expected State: 3 active classes on Workers | 0 active classes on Masters (Interface Flushed).
+  - Kernel Verification: Confirm root HTB qdisc ('1:') is deleted on Master nodes.
+
+
+================================================================================
+2. CAPABILITY & SELECTOR VERIFICATION SUITE
+   File: test-selectors-and-tolerations.sh
+================================================================================
+
+PURPOSE
+-------
+Isolated feature-by-feature unit testing for API-level node targeting mechanism:
+- Legacy map-based 'nodeSelector'
+- Taint/Toleration enforcement on Control Plane / Master nodes
+- API-level 'NodeLabelSelector' (matchLabels and matchExpressions)
+- Custom node label targeting
+
+TEST CASES & EXPECTED RESULTS
+-----------------------------
+
+Test Case 1: Legacy nodeSelector (Workers Only)
+  - Configuration: spec.nodeSelector = {"node-role.kubernetes.io/worker": ""}
+  - Verification: Worker = 1 class | Master = 0 classes.
+
+Test Case 2: Taint Enforcement Failure (Missing Tolerations)
+  - Configuration: Target Master nodes using nodeSelector BUT omit tolerations.
+  - Verification: Worker = 0 classes | Master = 0 classes.
+  - Assertion: Master nodes must skip the policy due to un-tolerated taints.
+
+Test Case 3: Correct Tolerations Enforcement
+  - Configuration: Target Master nodes WITH matching 'node-role.kubernetes.io/master' tolerations.
+  - Verification: Worker = 0 classes | Master = 1 class.
+
+Test Case 4: NodeLabelSelector - matchLabels
+  - Configuration: spec.nodeLabelSelector.matchLabels = {"node-role.kubernetes.io/worker": ""}
+  - Verification: Worker = 1 class | Master = 0 classes.
+
+Test Case 5: NodeLabelSelector - matchExpressions
+  - Configuration: spec.nodeLabelSelector.matchExpressions with key 'node-role.kubernetes.io/master' 
+                   and operator 'Exists', plus matching toleration.
+  - Verification: Worker = 0 classes | Master = 1 class.
+
+Test Case 6: Custom Label Targeting
+  - Action: Label 'hub-worker01' with 'group=traffic-test'.
+  - Configuration: spec.nodeLabelSelector.matchLabels = {"group": "traffic-test"}
+  - Verification: Worker = 1 class (only on labeled node) | Master = 0 classes.
+
+
+================================================================================
+REQUIREMENTS FOR RUNNING TESTS
+================================================================================
+- Active OpenShift / Kubernetes session with 'cluster-admin' privileges.
+- 'oc', 'jq', and 'bash' binaries available in PATH.
+- OpenShift NMState configured with sub-interface 'enp1s0.100' on target nodes.
+- VLAN Traffic Control Operator deployed in namespace 'openshift-vlan-tc-operator'.

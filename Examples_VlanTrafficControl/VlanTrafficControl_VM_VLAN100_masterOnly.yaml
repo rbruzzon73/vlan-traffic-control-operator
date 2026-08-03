@@ -1,0 +1,38 @@
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: vlan-tc-master-vlan100
+  namespace: openshift-vlan-tc-operator
+spec:
+  # 1. Target Master / Control-Plane Nodes strictly
+  nodeSelector:
+    node-role.kubernetes.io/master: ""
+
+  # 2. Tolerations required to run on tainted Master nodes
+  tolerations:
+    - key: "node-role.kubernetes.io/master"
+      operator: "Exists"
+      effect: "NoSchedule"
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+
+  reconcileIntervalSeconds: 30
+  tcStrategy: flower
+  htbRoot:
+    interface: enp1s0.100
+    htbId: 1
+    rate: 10Gbit
+    defaultClassId: "1:99"
+    classes:
+      - name: storage-vlan-100-master
+        classId: "1:100"
+        matchType: subnet
+        subnet: 10.0.100.0/24
+        priority: 1
+        egressRate: 50Mbit
+        egressCeil: 10Gbit
+        egressBurst: 15k
+        ingressRate: 30Mbit
+        ingressBurst: 50k
+        enableFqCodel: true

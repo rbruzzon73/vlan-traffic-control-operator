@@ -29,8 +29,9 @@ generate: controller-gen ## Generate DeepCopy, DeepCopyInto, and DeepCopyObject 
 
 .PHONY: manifests
 manifests: controller-gen ## Generate CRD YAMLs and RBAC rules.
-	$(CONTROLLER_GEN) crd paths="./..." output:crd:artifacts:config=config/crd
+	$(CONTROLLER_GEN) crd:crdVersions=v1 paths="./api/..." output:crd:artifacts:config=config/crd/bases
 	$(CONTROLLER_GEN) rbac:roleName=manager-role paths="./..." output:rbac:artifacts:config=config/rbac
+	$(CONTROLLER_GEN) object paths="./..."
 
 # --- Build Targets ---
 

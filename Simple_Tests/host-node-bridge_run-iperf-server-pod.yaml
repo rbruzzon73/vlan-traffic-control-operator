@@ -1,0 +1,28 @@
+# Delete old server pods completely
+oc delete pod -n iperf-test --all --force --grace-period=0
+
+# Redeploy Port 6001 (VLAN 100)
+oc run iperf3-server-6001 -n iperf-test \
+  --image=quay.io/rjhowe/oc-k8s-netperf:latest \
+  --overrides='{"spec": {"hostNetwork": true, "serviceAccountName": "iperf", "nodeSelector": {"iperf": "test"}, "tolerations": [{"operator": "Exists"}]}}' \
+  -- iperf3 -s -p 6001
+
+# Redeploy Port 6002 (VLAN 280)
+oc run iperf3-server-6002 -n iperf-test \
+  --image=quay.io/rjhowe/oc-k8s-netperf:latest \
+  --overrides='{"spec": {"hostNetwork": true, "serviceAccountName": "iperf", "nodeSelector": {"iperf": "test"}, "tolerations": [{"operator": "Exists"}]}}' \
+  -- iperf3 -s -p 6002
+
+# Redeploy Port 6003 (VLAN 380)
+oc run iperf3-server-6003 -n iperf-test \
+  --image=quay.io/rjhowe/oc-k8s-netperf:latest \
+  --overrides='{"spec": {"hostNetwork": true, "serviceAccountName": "iperf", "nodeSelector": {"iperf": "test"}, "tolerations": [{"operator": "Exists"}]}}' \
+  -- iperf3 -s -p 6003
+
+# Wait for them to report Ready
+oc wait pod/iperf3-server-6001 pod/iperf3-server-6002 pod/iperf3-server-6003 -n iperf-test --for=condition=Ready --timeout=60s
+
+sleep 20
+
+oc debug node/hub-worker02.ocp4-hub.test.com --quiet=true -- chroot /host \
+  ss -tulpn | grep -E '6001|6002|6003'

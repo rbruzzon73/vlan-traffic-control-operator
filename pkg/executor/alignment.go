@@ -28,7 +28,7 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 	}
 
 	// Initialize slices to ensure clean JSON arrays ([]) rather than null values
-	report.Actual.Classes = make([]networkingv1alpha1.HtbClassSpec, 0)
+	report.Actual.Classes = make([]networkingv1alpha1.ClassSpec, 0)
 	report.Actual.IngressFilters = make([]networkingv1alpha1.FilterMeta, 0)
 
 	// Resolve target network link via Netlink
@@ -77,7 +77,7 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 			if htb, ok := c.(*netlink.HtbClass); ok {
 				classID := netlink.HandleStr(htb.Attrs().Handle)
 				liveClasses[classID] = htb
-				report.Actual.Classes = append(report.Actual.Classes, networkingv1alpha1.HtbClassSpec{
+				report.Actual.Classes = append(report.Actual.Classes, networkingv1alpha1.ClassSpec{
 					ClassID:  classID,
 					Priority: int(htb.Prio),
 				})
@@ -149,7 +149,7 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 
 		prioVal := plannedCls.Priority
 		if prioVal <= 0 {
-			prioVal = plannedCls.GetClassMinor()
+			prioVal = plannedCls.ClassMinor
 		}
 
 		if targetClassID != "" && plannedCls.GetClassID(rootHandle) != targetClassID {

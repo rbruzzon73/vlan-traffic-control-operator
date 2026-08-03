@@ -6,7 +6,10 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o agent cmd/agent/main.go
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
-RUN microdnf update -y && microdnf install -y iproute ethtool procps-ng && microdnf clean all
+# Include iproute-tc explicitly for UBI9
+RUN microdnf update -y && \
+    microdnf install -y iproute iproute-tc ethtool procps-ng && \
+    microdnf clean all
 WORKDIR /
 COPY --from=builder /workspace/agent /agent
 USER 0

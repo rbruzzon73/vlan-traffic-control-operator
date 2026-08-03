@@ -1,8 +1,10 @@
 package executor
 
 import (
+	"bufio"
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"github.com/go-logr/logr"
 	networkingv1alpha1 "networking.med.io/vlan-traffic-control/api/v1alpha1"
@@ -11,21 +13,25 @@ import (
 // ApplyHtbHierarchy executes Linux tc commands to configure HTB + fq_codel with dynamic classifiers
 func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) error {
 	if spec == nil {
-		return fmt.Errorf("htbRoot spec is nil")
+		log.Info("[HTB] Received nil spec, flushing interface")
+		return nil
 	}
 
 	iface := spec.Interface
+	if iface == "" {
+		return fmt.Errorf("interface name is empty")
+	}
 
-	// 1. Flush existing root and ingress qdiscs prior to setup
-	_ = FlushInterface(iface)
+	if len(spec.Classes) == 0 {
+		log.Info("[HTB] No active classes targeted for node, flushing interface", "interface", iface)
+		return FlushInterface(iface)
+	}
 
-	// Resolve Root Handle (e.g., 1 for handle 1:)
 	rootHandle := spec.HtbID
 	if rootHandle <= 0 {
 		rootHandle = 1
 	}
 
-	// Resolve Default Class Minor (e.g., 99 for default 1:99)
 	defaultMinor := spec.DefaultClassMinor
 	if defaultMinor <= 0 {
 		defaultMinor = 99
@@ -33,33 +39,60 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 
 	rootHandleStr := fmt.Sprintf("%d:", rootHandle)
 	parentClassStr := fmt.Sprintf("%d:1", rootHandle)
+	defaultClassHandle := fmt.Sprintf("%d:%d", rootHandle, defaultMinor)
 
-	// 2. Attach root HTB qdisc
-	cmdRoot := execHostCommand("tc", "qdisc", "add", "dev", iface, "root", "handle", rootHandleStr, "htb", "default", fmt.Sprintf("%d", defaultMinor))
-	if out, err := cmdRoot.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed root htb on %s: %s (%v)", iface, string(out), err)
+	desiredClasses := make(map[string]bool)
+	desiredClasses[parentClassStr] = true
+	desiredClasses[defaultClassHandle] = true
+
+	for _, c := range spec.Classes {
+		var classHandle string
+		if c.ClassID != "" {
+			classHandle = c.ClassID
+		} else {
+			classHandle = fmt.Sprintf("%d:%d", rootHandle, c.ClassMinor)
+		}
+		desiredClasses[classHandle] = true
 	}
 
-	// 3. Create parent class (e.g., 1:1 or 2:1)
-	cmdParent := execHostCommand("tc", "class", "add", "dev", iface, "parent", rootHandleStr, "classid", parentClassStr,
+	log.Info("[HTB] Running Orphan Class Prune Pass...", "interface", iface, "desiredClassCount", len(desiredClasses))
+	PruneOrphanedClasses(iface, rootHandle, desiredClasses, log)
+
+	// Attach root HTB qdisc
+	cmdRoot := execHostCommand("tc", "qdisc", "add", "dev", iface, "root", "handle", rootHandleStr, "htb", "default", fmt.Sprintf("%d", defaultMinor))
+	_ = cmdRoot.Run()
+
+	// Parent class
+	cmdParent := execHostCommand("tc", "class", "change", "dev", iface, "parent", rootHandleStr, "classid", parentClassStr,
 		"htb", "rate", spec.Rate, "ceil", spec.Rate, "burst", "0b", "cburst", "0b")
 	if out, err := cmdParent.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed class %s on %s: %s (%v)", parentClassStr, iface, string(out), err)
+		cmdParentAdd := execHostCommand("tc", "class", "add", "dev", iface, "parent", rootHandleStr, "classid", parentClassStr,
+			"htb", "rate", spec.Rate, "ceil", spec.Rate, "burst", "0b", "cburst", "0b")
+		if outAdd, errAdd := cmdParentAdd.CombinedOutput(); errAdd != nil {
+			log.Info("[HTB] Parent class setup warning", "class", parentClassStr, "output", string(outAdd), "error", errAdd.Error())
+		} else {
+			_ = out
+		}
 	}
 
-	// 3b. Create Default Fallback Class explicitly set to Priority 0
-	defaultClassHandle := fmt.Sprintf("%d:%d", rootHandle, defaultMinor)
-	cmdDefaultClass := execHostCommand("tc", "class", "add", "dev", iface, "parent", parentClassStr,
+	// Default fallback class
+	cmdDefaultClass := execHostCommand("tc", "class", "change", "dev", iface, "parent", parentClassStr,
 		"classid", defaultClassHandle, "htb", "prio", "0", "rate", "1Mbit", "ceil", spec.Rate)
 	if out, err := cmdDefaultClass.CombinedOutput(); err != nil {
-		log.Info("[HTB] Warning: Failed creating default class", "classHandle", defaultClassHandle, "output", string(out), "error", err.Error())
-	} else {
-		log.Info("[HTB] Created default fallback class with PRIO 0", "classHandle", defaultClassHandle)
+		cmdDefaultAdd := execHostCommand("tc", "class", "add", "dev", iface, "parent", parentClassStr,
+			"classid", defaultClassHandle, "htb", "prio", "0", "rate", "1Mbit", "ceil", spec.Rate)
+		_ = cmdDefaultAdd.Run()
+		_ = out
 	}
 
-	// 4. Iterate and configure child classes, fq_codel, and classifiers
+	// Child classes
 	for _, c := range spec.Classes {
-		classHandle := fmt.Sprintf("%d:%d", rootHandle, c.ClassMinor)
+		var classHandle string
+		if c.ClassID != "" {
+			classHandle = c.ClassID
+		} else {
+			classHandle = fmt.Sprintf("%d:%d", rootHandle, c.ClassMinor)
+		}
 
 		rate := c.EgressRate
 		ceil := c.EgressCeil
@@ -72,8 +105,7 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 			burst = "1250b"
 		}
 
-		// A. Subclass HTB
-		cmdClassArgs := []string{"tc", "class", "add", "dev", iface, "parent", parentClassStr,
+		cmdClassArgs := []string{"tc", "class", "change", "dev", iface, "parent", parentClassStr,
 			"classid", classHandle, "htb",
 			"prio", fmt.Sprintf("%d", c.Priority),
 			"rate", rate,
@@ -82,48 +114,97 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 		}
 		cmdClass := execHostCommand(cmdClassArgs[0], cmdClassArgs[1:]...)
 		if out, err := cmdClass.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed class %s on %s: %s (%v)", classHandle, iface, string(out), err)
+			cmdAddArgs := append([]string{"tc", "class", "add"}, cmdClassArgs[3:]...)
+			cmdAdd := execHostCommand(cmdAddArgs[0], cmdAddArgs[1:]...)
+			if outAdd, errAdd := cmdAdd.CombinedOutput(); errAdd != nil {
+				return fmt.Errorf("failed class %s on %s: %s (change err: %s, add err: %v)", classHandle, iface, string(outAdd), string(out), errAdd)
+			}
 		}
 
-		// B. Leaf qdisc fq_codel
 		if c.EnableFqCodel {
-			leafHandle := fmt.Sprintf("%d:", c.ClassMinor)
+			var classMinor int
+			if c.ClassMinor > 0 {
+				classMinor = c.ClassMinor
+			} else {
+				parts := strings.Split(classHandle, ":")
+				if len(parts) == 2 {
+					fmt.Sscanf(parts[1], "%d", &classMinor)
+				}
+			}
+			leafHandle := fmt.Sprintf("%d:", classMinor)
 			cmdLeaf := execHostCommand("tc", "qdisc", "add", "dev", iface, "parent", classHandle,
 				"handle", leafHandle, "fq_codel")
 			_ = cmdLeaf.Run()
 		}
 
-		// C. Dynamic Egress Classification Filter (VLAN, Subnet, Mark, or Auto)
-		_, proto, matchArgs, desc, err := ResolveClassifier(c, rootHandle)
+		proto, flowerMatch, desc, filterPrio, err := ResolveClassifier(c, rootHandle)
 		if err != nil {
 			log.Info("[HTB] Warning: Skipping filter generation", "classHandle", classHandle, "reason", err.Error())
 			continue
 		}
 
-		log.Info("[HTB] Adding egress filter rule", "interface", iface, "strategy", desc, "targetClass", classHandle)
+		log.Info("[HTB] Reconciling egress filter rule", "interface", iface, "strategy", desc, "targetClass", classHandle)
 
 		filterParentStr := fmt.Sprintf("%d:0", rootHandle)
-		filterArgs := []string{"tc", "filter", "add", "dev", iface, "parent", filterParentStr,
-			"protocol", proto, "prio", fmt.Sprintf("%d", c.Priority), "flower"}
-		filterArgs = append(filterArgs, matchArgs...)
+		filterArgs := []string{"tc", "filter", "replace", "dev", iface, "parent", filterParentStr,
+			"protocol", proto, "prio", fmt.Sprintf("%d", filterPrio), "flower"}
+		filterArgs = append(filterArgs, flowerMatch...)
 		filterArgs = append(filterArgs, "flowid", classHandle)
 
 		cmdFilter := execHostCommand(filterArgs[0], filterArgs[1:]...)
 		if out, err := cmdFilter.CombinedOutput(); err != nil {
-			log.Info("[HTB] Warning: Failed adding egress filter", "class", classHandle, "output", string(out), "error", err.Error())
+			log.Info("[HTB] Warning: Failed adding/replacing egress filter", "class", classHandle, "output", string(out), "error", err.Error())
 		}
 	}
 
 	return nil
 }
 
+// PruneOrphanedClasses queries active HTB classes and deletes unreferenced ones
+func PruneOrphanedClasses(iface string, rootHandle int, desiredClasses map[string]bool, log logr.Logger) {
+	cmd := execHostCommand("tc", "class", "show", "dev", iface)
+	out, err := cmd.Output()
+	if err != nil {
+		log.Info("[PRUNE] Unable to query tc classes (interface may not exist yet)", "interface", iface, "error", err.Error())
+		return
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+
+		if len(fields) >= 3 && fields[0] == "class" {
+			classHandle := fields[2]
+
+			prefix := fmt.Sprintf("%d:", rootHandle)
+			if !strings.HasPrefix(classHandle, prefix) {
+				continue
+			}
+
+			if !desiredClasses[classHandle] {
+				log.Info("🗑️ [PRUNE] Removing orphaned TC class from kernel", "interface", iface, "classHandle", classHandle)
+
+				filterParentStr := fmt.Sprintf("%d:0", rootHandle)
+				cmdDelFilter := execHostCommand("tc", "filter", "del", "dev", iface, "parent", filterParentStr)
+				_ = cmdDelFilter.Run()
+
+				cmdDelClass := execHostCommand("tc", "class", "del", "dev", iface, "classid", classHandle)
+				if outDel, errDel := cmdDelClass.CombinedOutput(); errDel != nil {
+					log.Info("⚠️ [PRUNE] Failed deleting orphaned class", "classHandle", classHandle, "output", string(outDel), "error", errDel.Error())
+				} else {
+					log.Info("✅ [PRUNE] Successfully deleted orphaned class", "classHandle", classHandle)
+				}
+			}
+		}
+	}
+}
+
 // FlushInterface deletes root and ingress qdiscs from interface to wipe all TC rules
 func FlushInterface(iface string) error {
-	// 1. Delete root HTB qdisc (wipes all egress classes and egress filters)
 	cmdRoot := execHostCommand("tc", "qdisc", "del", "dev", iface, "root")
 	_ = cmdRoot.Run()
 
-	// 2. Delete ingress qdisc (wipes all ingress policing filters)
 	cmdIngress := execHostCommand("tc", "qdisc", "del", "dev", iface, "ingress")
 	_ = cmdIngress.Run()
 

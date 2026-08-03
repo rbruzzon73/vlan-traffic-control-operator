@@ -2,260 +2,258 @@ package v1alpha1
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// TcStrategyType defines the strategy for Traffic Control execution
-// +kubebuilder:validation:Enum=flower;u32;auto
+// TcStrategyType defines the TC filter execution strategy (e.g. flower, u32, auto)
 type TcStrategyType string
 
 const (
-	TcStrategyAuto   TcStrategyType = "auto"
 	TcStrategyFlower TcStrategyType = "flower"
 	TcStrategyU32    TcStrategyType = "u32"
+	TcStrategyAuto   TcStrategyType = "auto"
 )
 
-// ClassifierType defines how traffic is identified on the host interface.
-// +kubebuilder:validation:Enum=vlan;subnet;mark;auto
-type ClassifierType string
-
-const (
-	ClassifierVlan   ClassifierType = "vlan"
-	ClassifierSubnet ClassifierType = "subnet"
-	ClassifierMark   ClassifierType = "mark"
-	ClassifierAuto   ClassifierType = "auto"
-)
-
-// VlanClassSpec defines rules for a single traffic class (VLAN, Subnet, or SKB Mark).
-type VlanClassSpec struct {
-	// Descriptive name for this traffic class. [OPTIONAL]
+// TolerationSpec represents pod/CR policy scheduling tolerations (e.g., Master/Control-Plane nodes).
+type TolerationSpec struct {
+	// Key is the taint key that the toleration applies to.
 	// +optional
-	Name string `json:"name,omitempty"`
+	Key string `json:"key,omitempty"`
 
-	// HTB minor class identifier (e.g., 10 for handle X:10). [OPTIONAL]
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=65535
+	// Operator represents a key's relationship to the value. Valid values are Exists and Equal.
 	// +optional
-	ClassMinor int `json:"classMinor,omitempty"`
+	Operator string `json:"operator,omitempty"`
 
-	// Unique HTB class identifier (e.g., "1:10", "1:100"). [OPTIONAL]
-	// +kubebuilder:validation:Pattern=`^1:[0-9]+$`
+	// Value is the taint value the toleration matches to.
+	// +optional
+	Value string `json:"value,omitempty"`
+
+	// Effect indicates the taint effect to match. Empty means match all taint effects.
+	// +optional
+	Effect string `json:"effect,omitempty"`
+}
+
+// ToCoreV1 converts TolerationSpec to standard corev1.Toleration
+func (t TolerationSpec) ToCoreV1() corev1.Toleration {
+	return corev1.Toleration{
+		Key:      t.Key,
+		Operator: corev1.TolerationOperator(t.Operator),
+		Value:    t.Value,
+		Effect:   corev1.TaintEffect(t.Effect),
+	}
+}
+
+// ClassSpec defines individual HTB class configuration parameters.
+type ClassSpec struct {
+	// Name is a descriptive human-readable name for this traffic class.
+	Name string `json:"name"`
+
+	// ClassID is the full HTB class identifier (e.g. "1:100").
 	// +optional
 	ClassID string `json:"classId,omitempty"`
 
-	// MatchType explicitly selects the classification strategy:
-	// - "vlan": Matches 802.1Q tagged traffic using vlanId (Range: 1-4094).
-	// - "subnet": Matches untagged/stripped traffic based on IP network CIDR using subnet.
-	// - "mark": Matches packets marked by OVS or iptables using mark (skbmark).
-	// - "auto" (default): Automatically selects classification based on defined fields. [OPTIONAL]
-	// +kubebuilder:default=auto
-	// +kubebuilder:validation:Enum=vlan;subnet;mark;auto
+	// ClassMinor is the minor ID of the HTB class (e.g. 100 for handle 1:100).
 	// +optional
-	MatchType ClassifierType `json:"matchType,omitempty"`
+	ClassMinor int `json:"classMinor,omitempty"`
 
-	// 802.1Q VLAN tag ID to match (Range: 1 to 4094). Required if matchType is "vlan". [OPTIONAL]
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=4094
+	// MatchType defines how traffic is classified: "vlan", "subnet", "ip", "port", or "dscp".
+	MatchType string `json:"matchType"`
+
+	// VlanID is the 802.1Q VLAN tag ID to match (1-4094).
 	// +optional
 	VlanID int `json:"vlanId,omitempty"`
 
-	// Subnet (CIDR) to match untagged or stripped traffic (e.g., "10.200.0.0/24"). Required if matchType is "subnet". [OPTIONAL]
+	// Subnet is the CIDR block to match for egress/ingress policing (e.g. "10.0.100.0/24").
 	// +optional
 	Subnet string `json:"subnet,omitempty"`
 
-	// Socket buffer mark (skbmark) set by OVS/iptables (e.g., 100 or 16). Required if matchType is "mark". [OPTIONAL]
+	// IP is a single IP address to match.
 	// +optional
-	Mark uint32 `json:"mark,omitempty"`
+	IP string `json:"ip,omitempty"`
 
-	// Guaranteed outbound bandwidth rate (e.g., "50Mbit", "1Gbit"). [REQUIRED]
-	// +kubebuilder:validation:Required
+	// Port is a L4 TCP/UDP port number to match.
+	// +optional
+	Port int `json:"port,omitempty"`
+
+	// Dscp is the Differentiated Services Code Point value to match (0-63).
+	// +optional
+	Dscp int `json:"dscp,omitempty"`
+
+	// EgressRate is the guaranteed egress bandwidth rate (e.g. "100Mbit", "1Gbit").
 	EgressRate string `json:"egressRate"`
 
-	// Maximum allowed outbound burst bandwidth ceiling (e.g., "100Mbit", "2Gbit"). [OPTIONAL]
+	// EgressCeil is the maximum burstable egress bandwidth rate (e.g. "500Mbit").
 	// +optional
 	EgressCeil string `json:"egressCeil,omitempty"`
 
-	// Outbound burst buffer size (Units: KB or Bytes, e.g., "15k"). [OPTIONAL]
+	// EgressBurst is the optional burst allowance size (e.g. "15k").
 	// +optional
 	EgressBurst string `json:"egressBurst,omitempty"`
 
-	// Hard policing bandwidth cap for incoming traffic (e.g., "20Mbit"). [OPTIONAL]
+	// EnableFqCodel controls whether fq_codel leaf qdisc is attached to this class.
+	// +optional
+	EnableFqCodel bool `json:"enableFqCodel,omitempty"`
+
+	// IngressRate is the maximum ingress rate limit for traffic policing.
 	// +optional
 	IngressRate string `json:"ingressRate,omitempty"`
 
-	// Incoming policing burst buffer size (Units: KB or Bytes, e.g., "10k"). [OPTIONAL]
-	// +optional
-	IngressBurst string `json:"ingressBurst,omitempty"`
-
-	// HTB Priority level (0=Highest Priority, 7=Lowest Priority). [OPTIONAL]
-	// +kubebuilder:default=0
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=7
+	// Priority is the HTB class priority (0-7, lower numbers indicate higher priority).
 	// +optional
 	Priority int `json:"priority,omitempty"`
-
-	// Toggles attaching fq_codel leaf qdisc to prevent bufferbloat. [OPTIONAL]
-	// +kubebuilder:default=true
-	// +optional
-	EnableFqCodel bool `json:"enableFqCodel"`
 }
 
-// GetClassMinor returns the integer minor class ID, parsing ClassID ("1:10") if ClassMinor isn't directly specified.
-func (c *VlanClassSpec) GetClassMinor() int {
-	if c.ClassMinor > 0 {
-		return c.ClassMinor
-	}
-	if c.ClassID != "" {
-		parts := strings.Split(c.ClassID, ":")
-		if len(parts) == 2 {
-			if val, err := strconv.Atoi(parts[1]); err == nil {
-				return val
-			}
-		}
-	}
-	return 0
-}
-
-// GetClassID returns the formatted class ID string (e.g., "1:10").
-func (c *VlanClassSpec) GetClassID(rootHtbID int) string {
+// GetClassID resolves the full "X:Y" class handle reliably.
+func (c *ClassSpec) GetClassID(rootID int) string {
 	if c.ClassID != "" {
 		return c.ClassID
 	}
-	if rootHtbID <= 0 {
-		rootHtbID = 1
+	if rootID <= 0 {
+		rootID = 1
 	}
-	return fmt.Sprintf("%d:%d", rootHtbID, c.GetClassMinor())
+	return formatClassHandle(rootID, c.ClassMinor)
 }
 
-// HtbClassSpec defines HTB class execution parameters used internally by executor engines.
-type HtbClassSpec struct {
-	Name          string         `json:"name,omitempty"`
-	ClassID       string         `json:"classId"`
-	ClassMinor    int            `json:"classMinor,omitempty"`
-	VlanID        int            `json:"vlanId,omitempty"`
-	Subnet        string         `json:"subnet,omitempty"`
-	Mark          uint32         `json:"mark,omitempty"`
-	Match         ClassifierType `json:"matchType,omitempty"`
-	Priority      int            `json:"priority,omitempty"`
-	EgressRate    string         `json:"egressRate,omitempty"`
-	EgressCeil    string         `json:"egressCeil,omitempty"`
-	EgressBurst   string         `json:"egressBurst,omitempty"`
-	IngressRate   string         `json:"ingressRate,omitempty"`
-	IngressBurst  string         `json:"ingressBurst,omitempty"`
-	EnableFqCodel bool           `json:"enableFqCodel,omitempty"`
+func formatClassHandle(rootID, minorID int) string {
+	return fmt.Sprintf("%d:%d", rootID, minorID)
 }
 
-// HtbRootSpec defines root HTB settings and target host interface.
+// HtbRootSpec defines the root HTB qdisc and attached class specs.
 type HtbRootSpec struct {
-	// Target physical, bond, or bridge network interface name (e.g., "enp1s0", "br-ex"). [REQUIRED]
-	// +kubebuilder:validation:Required
+	// Interface is the target network interface on the host (e.g. "enp1s0.100").
 	Interface string `json:"interface"`
 
-	// Total root egress bandwidth rate capacity (e.g., "10Gbit"). [REQUIRED]
-	// +kubebuilder:validation:Required
-	Rate string `json:"rate"`
-
-	// Default class minor ID where unclassified traffic is routed (e.g., 99 for handle X:99). [OPTIONAL]
-	// +kubebuilder:default=99
-	// +optional
-	DefaultClassMinor int `json:"defaultClassMinor,omitempty"`
-
-	// Default class ID where unclassified traffic is routed (e.g., "1:99"). [OPTIONAL]
-	// +kubebuilder:default="1:99"
-	// +optional
-	DefaultClassID string `json:"defaultClassId,omitempty"`
-
-	// Custom HTB root handle ID (e.g., 1 for handle 1:0). [OPTIONAL]
+	// HtbID is the root qdisc handle ID (e.g. 1 for handle "1:").
 	// +kubebuilder:default=1
 	// +optional
 	HtbID int `json:"htbId,omitempty"`
 
-	// List of traffic control classes configured on this interface. [REQUIRED]
-	// +kubebuilder:validation:Required
-	Classes []VlanClassSpec `json:"classes"`
+	// DefaultClassID is the fallback HTB class handle for unmatched traffic.
+	// +optional
+	DefaultClassID string `json:"defaultClassId,omitempty"`
+
+	// DefaultClassMinor is the minor ID of the default HTB class (e.g. 99 for handle "1:99").
+	// +kubebuilder:default=99
+	// +optional
+	DefaultClassMinor int `json:"defaultClassMinor,omitempty"`
+
+	// Rate is the total root qdisc capacity (e.g. "10Gbit").
+	Rate string `json:"rate"`
+
+	// Classes is the list of HTB leaf classes attached to this root.
+	Classes []ClassSpec `json:"classes"`
 }
 
-// GetDefaultClassMinor returns DefaultClassMinor, parsing DefaultClassID ("1:99") if DefaultClassMinor isn't directly specified.
-func (r *HtbRootSpec) GetDefaultClassMinor() int {
-	if r.DefaultClassMinor > 0 {
-		return r.DefaultClassMinor
-	}
-	if r.DefaultClassID != "" {
-		parts := strings.Split(r.DefaultClassID, ":")
-		if len(parts) == 2 {
-			if val, err := strconv.Atoi(parts[1]); err == nil {
-				return val
-			}
-		}
-	}
-	return 99
+// VlanTrafficControlSpec defines the desired state of VlanTrafficControl.
+type VlanTrafficControlSpec struct {
+	// NodeSelector is an optional map of key-value pairs to target specific nodes.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// NodeLabelSelector provides full Kubernetes label selector matching (matchLabels & matchExpressions).
+	// +optional
+	NodeLabelSelector *metav1.LabelSelector `json:"nodeLabelSelector,omitempty"`
+
+	// Tolerations allows optional policy scheduling tolerations (e.g. to enforce policies on Master nodes).
+	// +optional
+	Tolerations []TolerationSpec `json:"tolerations,omitempty"`
+
+	// ReconcileIntervalSeconds defines the interval in seconds between node agent reconciliation loops.
+	// +kubebuilder:default=30
+	// +optional
+	ReconcileIntervalSeconds int `json:"reconcileIntervalSeconds,omitempty"`
+
+	// TcStrategy specifies the strategy used to classify traffic: "flower", "u32", or "auto".
+	// +kubebuilder:validation:Enum=flower;u32;auto
+	// +kubebuilder:default="flower"
+	TcStrategy TcStrategyType `json:"tcStrategy"`
+
+	// HtbRoot defines the root HTB qdisc and class tree configuration.
+	HtbRoot HtbRootSpec `json:"htbRoot"`
 }
 
-// --- TELEMETRY / STATS STRUCTURES ---
-
-// InterfaceStats represents the complete telemetry payload for a node's network interface.
-type InterfaceStats struct {
-	Interface    string        `json:"interface"`
-	Node         string        `json:"node"`
-	ClassStats   []ClassStat   `json:"classStats"`
-	IngressStats []IngressStat `json:"ingressStats"`
-}
-
-// ClassStat defines egress HTB class telemetry.
+// ClassStat defines performance metrics for a single HTB class.
 type ClassStat struct {
 	ClassID    string `json:"classId"`
-	Name       string `json:"name,omitempty"`
-	Prio       int    `json:"prio"`
+	ClassName  string `json:"className,omitempty"`
 	Bytes      uint64 `json:"bytes"`
 	Packets    uint64 `json:"packets"`
-	Overlimits uint64 `json:"overlimits"`
-	Borrowed   uint64 `json:"borrowed"`
+	RateBps    uint64 `json:"rateBps,omitempty"`
+	Pps        uint64 `json:"pps,omitempty"`
+	Drops      uint32 `json:"drops,omitempty"`
+	Overlimits uint32 `json:"overlimits,omitempty"`
 }
 
-// IngressStat defines ingress policing filter telemetry.
+// IngressStat defines performance metrics for an ingress policing filter.
 type IngressStat struct {
-	ClassID  string `json:"classId"`
 	FilterID string `json:"filterId"`
+	Subnet   string `json:"subnet,omitempty"`
 	Bytes    uint64 `json:"bytes"`
 	Packets  uint64 `json:"packets"`
 	Drops    uint64 `json:"drops"`
 }
 
-// VlanTrafficControlSpec defines the desired state of VlanTrafficControl.
-type VlanTrafficControlSpec struct {
-	// Map of node labels used to select target worker nodes. [OPTIONAL]
-	// +optional
-	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
-
-	// Interval in seconds between node agent reconciliation loops. [OPTIONAL]
-	// +kubebuilder:default=30
-	// +optional
-	ReconcileIntervalSeconds int `json:"reconcileIntervalSeconds,omitempty"`
-
-	// Strategy used to classify traffic: "flower", "u32", or "auto". [REQUIRED]
-	// +kubebuilder:validation:Enum=flower;u32;auto
-	// +kubebuilder:default="flower"
-	TcStrategy TcStrategyType `json:"tcStrategy"`
-
-	// Root HTB configuration parameters. [REQUIRED]
-	HtbRoot HtbRootSpec `json:"htbRoot"`
+// InterfaceStats represents aggregated traffic stats for a host interface.
+type InterfaceStats struct {
+	Interface    string        `json:"interface"`
+	Node         string        `json:"node,omitempty"`
+	ClassStats   []ClassStat   `json:"classStats"`
+	IngressStats []IngressStat `json:"ingressStats"`
 }
 
-// VlanTrafficControlStatus defines the observed runtime status and conditions aggregated across worker node agents.
+// ConfigDriftDelta represents individual class or qdisc drift details.
+type ConfigDriftDelta struct {
+	TargetHandle string `json:"targetHandle"`
+	Property     string `json:"property"`
+	Expected     string `json:"expected"`
+	Actual       string `json:"actual"`
+}
+
+// FilterMeta represents kernel filter metadata discovered via Netlink.
+type FilterMeta struct {
+	Priority uint16 `json:"priority"`
+	Type     string `json:"type"`
+	Protocol uint16 `json:"protocol"`
+}
+
+// ActualNodeState contains observed live kernel netlink TC state.
+type ActualNodeState struct {
+	HtbQdiscPresent bool         `json:"htbQdiscPresent"`
+	IngressPresent  bool         `json:"ingressPresent"`
+	Classes         []ClassSpec  `json:"classes"`
+	IngressFilters  []FilterMeta `json:"ingressFilters"`
+}
+
+// NodeConfigReport tracks policy alignment state across cluster nodes.
+type NodeConfigReport struct {
+	Node        string             `json:"node"`
+	Interface   string             `json:"interface"`
+	IsAligned   bool               `json:"isAligned"`
+	Desired     HtbRootSpec        `json:"desired"`
+	Actual      ActualNodeState    `json:"actual"`
+	DriftDeltas []ConfigDriftDelta `json:"driftDeltas"`
+}
+
+// VlanTrafficControlStatus defines the observed state of VlanTrafficControl.
 type VlanTrafficControlStatus struct {
-	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
-	Conditions         []metav1.Condition `json:"conditions,omitempty"`
+	// Conditions track the reconciliation state and health of the traffic control policy.
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// ObservedGeneration represents the last generation reconciled by the operator.
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// ActiveNodes lists host nodes currently enforcing this policy.
+	ActiveNodes []string `json:"activeNodes,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:resource:path=vlantrafficcontrols,shortName=vtc;vtcs,scope=Cluster
 
-// VlanTrafficControl is the Schema for the vlantrafficcontrols API
+// VlanTrafficControl is the Schema for the vlantrafficcontrols API.
 type VlanTrafficControl struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -266,7 +264,7 @@ type VlanTrafficControl struct {
 
 // +kubebuilder:object:root=true
 
-// VlanTrafficControlList contains a list of VlanTrafficControl
+// VlanTrafficControlList contains a list of VlanTrafficControl.
 type VlanTrafficControlList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
@@ -282,37 +280,4 @@ func init() {
 		metav1.AddToGroupVersion(s, GroupVersion)
 		return nil
 	})
-}
-
-// NodeConfigReport represents the expected vs live host TC configuration state.
-type NodeConfigReport struct {
-	Node        string             `json:"node"`
-	Interface   string             `json:"interface"`
-	IsAligned   bool               `json:"isAligned"`
-	Desired     HtbRootSpec        `json:"desired"`
-	Actual      LiveNodeConfig     `json:"actual"`
-	DriftDeltas []ConfigDriftDelta `json:"driftDeltas,omitempty"`
-}
-
-// LiveNodeConfig holds what is currently configured in the host kernel.
-type LiveNodeConfig struct {
-	HtbQdiscPresent bool            `json:"htbQdiscPresent"`
-	IngressPresent  bool            `json:"ingressPresent"`
-	RootRate        string          `json:"rootRate,omitempty"`
-	Classes         []HtbClassSpec  `json:"classes"`
-        IngressFilters  []FilterMeta     `json:"ingressFilters,omitempty"`
-}
-
-type FilterMeta struct {
-	Priority uint16 `json:"priority"`
-	Type     string `json:"type"`     // e.g. "fw", "flower", "u32"
-	Protocol uint16 `json:"protocol"`
-}
-
-// ConfigDriftDelta describes a single discrepancy between planned and actual state.
-type ConfigDriftDelta struct {
-	TargetHandle string `json:"targetHandle"` // e.g. "class 1:100" or "ingress pref 100"
-	Property     string `json:"property"`     // e.g. "rate", "prio", "missing"
-	Expected     string `json:"expected"`
-	Actual       string `json:"actual"`
 }

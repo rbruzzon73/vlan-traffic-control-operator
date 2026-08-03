@@ -1,0 +1,164 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: vm-vlan100
+  namespace: tc-virt-validation
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: vm-vlan100
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: "hub-worker01.ocp4-hub.test.com"
+      domain:
+        devices:
+          disks:
+            - name: containerdisk
+              disk: { bus: virtio }
+            - name: cloudinitdisk
+              disk: { bus: virtio }
+          interfaces:
+            - name: default
+              masquerade: {}
+            - name: secondary
+              bridge: {}
+        resources:
+          requests:
+            memory: 1024Mi
+            cpu: 100m
+      networks:
+        - name: default
+          pod: {}
+        - name: secondary
+          multus:
+            networkName: nad-vlan100
+      volumes:
+        - name: containerdisk
+          containerDisk:
+            image: quay.io/containerdisks/fedora:latest
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              user: redhat
+              password: ocp4
+              chpasswd: { expire: False }
+              ssh_pwauth: True
+              ssh_authorized_keys:
+                - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCXRtfem176mb9LBDAonX9Do1CV7ecZQ208G14R4DPME5srE3WkGJ5Ni80ok8uK8G+58nsItEOIcF78REw32l2e3vlCl5Cr6V6Xj2+2d9gjG/qVDgncYCdPK9+an7VUc9REhQdhgxOQR+SXdQN9eRk4iVf7/sIUAtBYTgVjxOLqujmeZK32+LIptXnYuL6Y2InCRq2bO1ITFDQMYXKc4zIjTbvnxgEjNWVdC3L+EkZNcn5oiSW+dc/e7XVw7HeO/bP0MChkpzVQRj8qALxcjl/FSOU0dRDJg6N/sHaeGGCyKTivNweIvSOYhWsZN/xotVWYvIReDRqX9/3JtkFtPxNbzfrwYjHwwWjc2ajdfIXIeZ6Z4LGKtir6Ht+lbpu8MngTtsdxPjmx50bUX0gxHmzEmsnJy/z+PIZMR0iZQRUBMscTU5K6MLofaynbrjeg3ibXT/3AV/t45+5zGaDbjidxJVP/gTekoj5IywrRSg/QUJrLeYtyl7rktT8IGpQOoiM= rbruzzon@rbruzzon-platinum.server.test.com
+              runcmd:
+                - dnf install -y iperf3 || true
+                - nmcli connection add type ethernet ifname enp2s0 con-name eth-secondary ip4 10.0.100.202/24 autoconnect yes || true
+                - nmcli connection up eth-secondary || true
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: vm-vlan280
+  namespace: tc-virt-validation
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: vm-vlan280
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: "hub-worker01.ocp4-hub.test.com"
+      domain:
+        devices:
+          disks:
+            - name: containerdisk
+              disk: { bus: virtio }
+            - name: cloudinitdisk
+              disk: { bus: virtio }
+          interfaces:
+            - name: default
+              masquerade: {}
+            - name: secondary
+              bridge: {}
+        resources:
+          requests:
+            memory: 1024Mi
+            cpu: 100m
+      networks:
+        - name: default
+          pod: {}
+        - name: secondary
+          multus:
+            networkName: nad-vlan280
+      volumes:
+        - name: containerdisk
+          containerDisk:
+            image: quay.io/containerdisks/fedora:latest
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              user: redhat
+              password: ocp4
+              chpasswd: { expire: False }
+              ssh_pwauth: True
+              ssh_authorized_keys:
+                - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCXRtfem176mb9LBDAonX9Do1CV7ecZQ208G14R4DPME5srE3WkGJ5Ni80ok8uK8G+58nsItEOIcF78REw32l2e3vlCl5Cr6V6Xj2+2d9gjG/qVDgncYCdPK9+an7VUc9REhQdhgxOQR+SXdQN9eRk4iVf7/sIUAtBYTgVjxOLqujmeZK32+LIptXnYuL6Y2InCRq2bO1ITFDQMYXKc4zIjTbvnxgEjNWVdC3L+EkZNcn5oiSW+dc/e7XVw7HeO/bP0MChkpzVQRj8qALxcjl/FSOU0dRDJg6N/sHaeGGCyKTivNweIvSOYhWsZN/xotVWYvIReDRqX9/3JtkFtPxNbzfrwYjHwwWjc2ajdfIXIeZ6Z4LGKtir6Ht+lbpu8MngTtsdxPjmx50bUX0gxHmzEmsnJy/z+PIZMR0iZQRUBMscTU5K6MLofaynbrjeg3ibXT/3AV/t45+5zGaDbjidxJVP/gTekoj5IywrRSg/QUJrLeYtyl7rktT8IGpQOoiM= rbruzzon@rbruzzon-platinum.server.test.com
+              runcmd:
+                - dnf install -y iperf3 || true
+                - nmcli connection add type ethernet ifname enp2s0 con-name eth-secondary ip4 10.0.218.202/24 autoconnect yes || true
+                - nmcli connection up eth-secondary || true
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: vm-vlan380
+  namespace: tc-virt-validation
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: vm-vlan380
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: "hub-worker01.ocp4-hub.test.com"
+      domain:
+        devices:
+          disks:
+            - name: containerdisk
+              disk: { bus: virtio }
+            - name: cloudinitdisk
+              disk: { bus: virtio }
+          interfaces:
+            - name: default
+              masquerade: {}
+            - name: secondary
+              bridge: {}
+        resources:
+          requests:
+            memory: 1024Mi
+            cpu: 100m
+      networks:
+        - name: default
+          pod: {}
+        - name: secondary
+          multus:
+            networkName: nad-vlan380
+      volumes:
+        - name: containerdisk
+          containerDisk:
+            image: quay.io/containerdisks/fedora:latest
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              user: redhat
+              password: ocp4
+              chpasswd: { expire: False }
+              ssh_pwauth: True
+              ssh_authorized_keys:
+                - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCXRtfem176mb9LBDAonX9Do1CV7ecZQ208G14R4DPME5srE3WkGJ5Ni80ok8uK8G+58nsItEOIcF78REw32l2e3vlCl5Cr6V6Xj2+2d9gjG/qVDgncYCdPK9+an7VUc9REhQdhgxOQR+SXdQN9eRk4iVf7/sIUAtBYTgVjxOLqujmeZK32+LIptXnYuL6Y2InCRq2bO1ITFDQMYXKc4zIjTbvnxgEjNWVdC3L+EkZNcn5oiSW+dc/e7XVw7HeO/bP0MChkpzVQRj8qALxcjl/FSOU0dRDJg6N/sHaeGGCyKTivNweIvSOYhWsZN/xotVWYvIReDRqX9/3JtkFtPxNbzfrwYjHwwWjc2ajdfIXIeZ6Z4LGKtir6Ht+lbpu8MngTtsdxPjmx50bUX0gxHmzEmsnJy/z+PIZMR0iZQRUBMscTU5K6MLofaynbrjeg3ibXT/3AV/t45+5zGaDbjidxJVP/gTekoj5IywrRSg/QUJrLeYtyl7rktT8IGpQOoiM= rbruzzon@rbruzzon-platinum.server.test.com
+              runcmd:
+                - dnf install -y iperf3 || true
+                - nmcli connection add type ethernet ifname enp2s0 con-name eth-secondary ip4 10.0.238.202/24 autoconnect yes || true
+                - nmcli connection up eth-secondary || true

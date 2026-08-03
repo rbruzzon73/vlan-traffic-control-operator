@@ -11,6 +11,9 @@ spec:
     kind: VlanTrafficControl
     listKind: VlanTrafficControlList
     plural: vlantrafficcontrols
+    shortNames:
+    - vtc
+    - vtcs
     singular: vlantrafficcontrol
   scope: Cluster
   versions:
@@ -18,7 +21,7 @@ spec:
     schema:
       openAPIV3Schema:
         description: VlanTrafficControl is the Schema for the vlantrafficcontrols
-          API
+          API.
         properties:
           apiVersion:
             description: |-
@@ -41,137 +44,212 @@ spec:
             description: VlanTrafficControlSpec defines the desired state of VlanTrafficControl.
             properties:
               htbRoot:
-                description: Root HTB configuration parameters. [REQUIRED]
+                description: HtbRoot defines the root HTB qdisc and class tree configuration.
                 properties:
                   classes:
-                    description: List of traffic control classes configured on this
-                      interface. [REQUIRED]
+                    description: Classes is the list of HTB leaf classes attached
+                      to this root.
                     items:
-                      description: VlanClassSpec defines rules for a single traffic
-                        class (VLAN, Subnet, or SKB Mark).
+                      description: ClassSpec defines individual HTB class configuration
+                        parameters.
                       properties:
                         classId:
-                          description: Unique HTB class identifier on the interface
-                            (e.g., "1:10"). [REQUIRED]
-                          pattern: ^1:[0-9]+$
+                          description: ClassID is the full HTB class identifier (e.g.
+                            "1:100").
                           type: string
+                        classMinor:
+                          description: ClassMinor is the minor ID of the HTB class
+                            (e.g. 100 for handle 1:100).
+                          type: integer
+                        dscp:
+                          description: Dscp is the Differentiated Services Code Point
+                            value to match (0-63).
+                          type: integer
                         egressBurst:
-                          description: 'Outbound burst buffer size (Units: KB or Bytes,
-                            e.g., "15k"). [OPTIONAL]'
+                          description: EgressBurst is the optional burst allowance
+                            size (e.g. "15k").
                           type: string
                         egressCeil:
-                          description: Maximum allowed outbound burst bandwidth ceiling
-                            (e.g., "100Mbit", "2Gbit"). [OPTIONAL]
+                          description: EgressCeil is the maximum burstable egress
+                            bandwidth rate (e.g. "500Mbit").
                           type: string
                         egressRate:
-                          description: Guaranteed outbound bandwidth rate (e.g., "50Mbit",
-                            "1Gbit"). [REQUIRED]
+                          description: EgressRate is the guaranteed egress bandwidth
+                            rate (e.g. "100Mbit", "1Gbit").
                           type: string
                         enableFqCodel:
-                          default: true
-                          description: Toggles attaching fq_codel leaf qdisc to prevent
-                            bufferbloat. [OPTIONAL]
+                          description: EnableFqCodel controls whether fq_codel leaf
+                            qdisc is attached to this class.
                           type: boolean
-                        ingressBurst:
-                          description: 'Incoming policing burst buffer size (Units:
-                            KB or Bytes, e.g., "10k"). [OPTIONAL]'
-                          type: string
                         ingressRate:
-                          description: Hard policing bandwidth cap for incoming traffic
-                            (e.g., "20Mbit"). [OPTIONAL]
+                          description: IngressRate is the maximum ingress rate limit
+                            for traffic policing.
                           type: string
-                        mark:
-                          description: Socket buffer mark (skbmark) set by OVS/iptables
-                            (e.g., 100 or 16). Required if matchType is "mark". [OPTIONAL]
-                          format: int32
-                          type: integer
+                        ip:
+                          description: IP is a single IP address to match.
+                          type: string
                         matchType:
-                          default: auto
-                          description: 'MatchType explicitly selects classification
-                            strategy: "vlan", "subnet", "mark", or "auto" (default:
-                            "auto"). [OPTIONAL]'
-                          enum:
-                          - vlan
-                          - subnet
-                          - mark
-                          - auto
+                          description: 'MatchType defines how traffic is classified:
+                            "vlan", "subnet", "ip", "port", or "dscp".'
                           type: string
                         name:
-                          description: Descriptive name for this traffic class. [OPTIONAL]
+                          description: Name is a descriptive human-readable name for
+                            this traffic class.
                           type: string
+                        port:
+                          description: Port is a L4 TCP/UDP port number to match.
+                          type: integer
                         priority:
-                          default: 0
-                          description: HTB Priority level (0=Highest Priority, 7=Lowest
-                            Priority). [OPTIONAL]
-                          maximum: 7
-                          minimum: 0
+                          description: Priority is the HTB class priority (0-7, lower
+                            numbers indicate higher priority).
                           type: integer
                         subnet:
-                          description: Subnet (CIDR) to match untagged or stripped
-                            traffic (e.g., "10.100.0.0/24"). Required if matchType
-                            is "subnet". [OPTIONAL]
+                          description: Subnet is the CIDR block to match for egress/ingress
+                            policing (e.g. "10.0.100.0/24").
                           type: string
                         vlanId:
-                          description: '802.1Q VLAN tag ID to match (Range: 1 to 4094).
-                            Required if matchType is "vlan". [OPTIONAL]'
-                          maximum: 4094
-                          minimum: 1
+                          description: VlanID is the 802.1Q VLAN tag ID to match (1-4094).
                           type: integer
                       required:
-                      - classId
                       - egressRate
+                      - matchType
+                      - name
                       type: object
                     type: array
                   defaultClassId:
-                    default: 1:99
-                    description: Default class ID where unclassified traffic is routed.
-                      [OPTIONAL]
+                    description: DefaultClassID is the fallback HTB class handle for
+                      unmatched traffic.
                     type: string
+                  defaultClassMinor:
+                    default: 99
+                    description: DefaultClassMinor is the minor ID of the default
+                      HTB class (e.g. 99 for handle "1:99").
+                    type: integer
                   htbId:
-                    description: Custom HTB root handle ID. [OPTIONAL]
+                    default: 1
+                    description: HtbID is the root qdisc handle ID (e.g. 1 for handle
+                      "1:").
                     type: integer
                   interface:
-                    description: Target physical, bond, or bridge network interface
-                      name (e.g., "enp1s0", "br-ex"). [REQUIRED]
+                    description: Interface is the target network interface on the
+                      host (e.g. "enp1s0.100").
                     type: string
                   rate:
-                    description: Total root egress bandwidth rate capacity (e.g.,
-                      "10Gbit"). [REQUIRED]
+                    description: Rate is the total root qdisc capacity (e.g. "10Gbit").
                     type: string
                 required:
                 - classes
                 - interface
                 - rate
                 type: object
+              nodeLabelSelector:
+                description: NodeLabelSelector provides full Kubernetes label selector
+                  matching (matchLabels & matchExpressions).
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
               nodeSelector:
                 additionalProperties:
                   type: string
-                description: Map of node labels used to select target worker nodes.
-                  [OPTIONAL]
+                description: NodeSelector is an optional map of key-value pairs to
+                  target specific nodes.
                 type: object
               reconcileIntervalSeconds:
                 default: 30
-                description: Interval in seconds between node agent reconciliation
-                  loops. [OPTIONAL]
+                description: ReconcileIntervalSeconds defines the interval in seconds
+                  between node agent reconciliation loops.
                 type: integer
               tcStrategy:
                 default: flower
-                description: 'Strategy used to classify traffic: "flower", "u32",
-                  or "auto". [REQUIRED]'
+                description: 'TcStrategy specifies the strategy used to classify traffic:
+                  "flower", "u32", or "auto".'
                 enum:
                 - flower
                 - u32
                 - auto
                 type: string
+              tolerations:
+                description: Tolerations allows optional policy scheduling tolerations
+                  (e.g. to enforce policies on Master nodes).
+                items:
+                  description: TolerationSpec represents pod/CR policy scheduling
+                    tolerations (e.g., Master/Control-Plane nodes).
+                  properties:
+                    effect:
+                      description: Effect indicates the taint effect to match. Empty
+                        means match all taint effects.
+                      type: string
+                    key:
+                      description: Key is the taint key that the toleration applies
+                        to.
+                      type: string
+                    operator:
+                      description: Operator represents a key's relationship to the
+                        value. Valid values are Exists and Equal.
+                      type: string
+                    value:
+                      description: Value is the taint value the toleration matches
+                        to.
+                      type: string
+                  type: object
+                type: array
             required:
             - htbRoot
             - tcStrategy
             type: object
           status:
-            description: VlanTrafficControlStatus defines the observed runtime status
-              and conditions aggregated across worker node agents.
+            description: VlanTrafficControlStatus defines the observed state of VlanTrafficControl.
             properties:
+              activeNodes:
+                description: ActiveNodes lists host nodes currently enforcing this
+                  policy.
+                items:
+                  type: string
+                type: array
               conditions:
+                description: Conditions track the reconciliation state and health
+                  of the traffic control policy.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -228,6 +306,8 @@ spec:
                   type: object
                 type: array
               observedGeneration:
+                description: ObservedGeneration represents the last generation reconciled
+                  by the operator.
                 format: int64
                 type: integer
             type: object

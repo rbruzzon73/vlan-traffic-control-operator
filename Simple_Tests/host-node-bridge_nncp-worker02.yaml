@@ -1,0 +1,68 @@
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: worker02-vlan-bridges-policy
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: "hub-worker02.ocp4-hub.test.com"
+  desiredState:
+    interfaces:
+      # --- VLAN 100 ---
+      - name: enp1s0.100
+        type: vlan
+        state: up
+        vlan:
+          base-iface: enp1s0
+          id: 100
+      - name: br-vlan100
+        type: linux-bridge
+        state: up
+        bridge:
+          port:
+            - name: enp1s0.100
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 10.0.100.22
+              prefix-length: 24
+
+      # --- VLAN 280 ---
+      - name: enp1s0.280
+        type: vlan
+        state: up
+        vlan:
+          base-iface: enp1s0
+          id: 280
+      - name: br-vlan280
+        type: linux-bridge
+        state: up
+        bridge:
+          port:
+            - name: enp1s0.280
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 10.0.218.22
+              prefix-length: 24
+
+      # --- VLAN 380 ---
+      - name: enp1s0.380
+        type: vlan
+        state: up
+        vlan:
+          base-iface: enp1s0
+          id: 380
+      - name: br-vlan380
+        type: linux-bridge
+        state: up
+        bridge:
+          port:
+            - name: enp1s0.380
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 10.0.238.22
+              prefix-length: 24

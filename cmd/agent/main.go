@@ -7,17 +7,22 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
 	"go.uber.org/zap"
 
-	networkingv1alpha1 "networking.med.io/vlan-traffic-control/api/v1alpha1"
-	"networking.med.io/vlan-traffic-control/pkg/executor"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	networkingv1alpha1 "networking.med.io/vlan-traffic-control/api/v1alpha1"
+	"networking.med.io/vlan-traffic-control/pkg/executor"
 )
 
 var (
@@ -41,7 +46,6 @@ func main() {
 		nodeName, _ = os.Hostname()
 	}
 
-	// Attach nodeName to base logger so ALL log entries automatically include node context
 	log := zapr.NewLogger(zapLog).WithValues("nodeName", nodeName)
 
 	log.Info("=== Starting VLAN Traffic Control Agent ===", "pid", os.Getpid())
@@ -69,16 +73,15 @@ func main() {
 
 	// 3. Initial reconciliation pass on startup
 	log.Info("[INIT] Running startup TC reconciliation pass...")
-	reconcileLocalTc(k8sClient, log)
+	reconcileLocalTc(k8sClient, nodeName, log)
 
-	// 4. HTTP /stats Handler (Direct Netlink Querying with Filtering)
+	// 4. HTTP /stats Handler
 	http.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
 		iface := r.URL.Query().Get("interface")
 		if iface == "" {
 			iface = "enp1s0"
 		}
 
-		// Parse optional target VLAN or ClassID filters
 		var targetVlan int
 		if vlanStr := r.URL.Query().Get("vlan"); vlanStr != "" {
 			targetVlan, _ = strconv.Atoi(vlanStr)
@@ -87,12 +90,17 @@ func main() {
 
 		log.Info("[API] GET /stats", "clientIP", r.RemoteAddr, "interface", iface, "targetVlan", targetVlan, "targetClassID", targetClassID)
 
-		// Build classMap (mapping "1:100" -> "storage-vlan-100") from active CRDs
-		classMap := make(map[string]string)
 		ctx := context.Background()
+		hostNode := getHostNode(ctx, k8sClient, nodeName, log)
+
+		classMap := make(map[string]string)
 		var list networkingv1alpha1.VlanTrafficControlList
 		if err := k8sClient.List(ctx, &list); err == nil {
 			for _, item := range list.Items {
+				if !isPolicyTargetingNode(hostNode, nodeName, &item, log) {
+					continue
+				}
+
 				rootHandle := item.Spec.HtbRoot.HtbID
 				if rootHandle <= 0 {
 					rootHandle = 1
@@ -106,7 +114,6 @@ func main() {
 			}
 		}
 
-		// Query statistics via high-performance Netlink socket
 		stats, errStats := executor.GetInterfaceStatsFiltered(iface, classMap, targetVlan, targetClassID)
 		if errStats != nil {
 			log.Error(errStats, "[API] Failed retrieving Netlink stats", "interface", iface)
@@ -125,7 +132,7 @@ func main() {
 		_ = json.NewEncoder(w).Encode(stats)
 	})
 
-	// 5. HTTP /cleanup Handler (Full Root & Ingress Qdisc Wipe)
+	// 5. HTTP /cleanup Handler
 	http.HandleFunc("/cleanup", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete && r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -140,7 +147,6 @@ func main() {
 		log.Info("========================================================================")
 		log.Info("[CLEANUP] Starting host TC rule cleanup...", "interface", iface, "triggeredBy", r.RemoteAddr)
 
-		// Deletes root HTB qdisc and ingress policing qdisc via FlushInterface
 		errCleanup := executor.FlushInterface(iface)
 		if errCleanup != nil {
 			log.Error(errCleanup, "[CLEANUP] Error during interface flush", "interface", iface)
@@ -166,51 +172,60 @@ func main() {
 		}
 
 		log.Info("[API] POST /reconcile triggered by Manager", "client", r.RemoteAddr)
-		reconcileLocalTc(k8sClient, log)
+		reconcileLocalTc(k8sClient, nodeName, log)
 
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"reconciled","node":"` + nodeName + `"}`))
 	})
 
-        // 7. HTTP /config Handler (Full or Partial Alignment Verification)
-        http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
-            iface := r.URL.Query().Get("interface")
-            if iface == "" {
-                iface = "enp1s0"
-            }
+	// 7. HTTP /config Handler
+	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+		iface := r.URL.Query().Get("interface")
+		if iface == "" {
+			iface = "enp1s0"
+		}
 
-            targetClassID := r.URL.Query().Get("classId") // Optional partial query parameter
+		targetClassID := r.URL.Query().Get("classId")
 
-            // 1. Aggregate planned CRDs active for this node
-            ctx := context.Background()
-            var list networkingv1alpha1.VlanTrafficControlList
-            if err := k8sClient.List(ctx, &list); err != nil {
-                http.Error(w, "failed listing CRD specs", http.StatusInternalServerError)
-                return
-            }
+		ctx := context.Background()
+		hostNode := getHostNode(ctx, k8sClient, nodeName, log)
 
-            // Merge planned root specs for target interface
-            var aggregatedSpec networkingv1alpha1.HtbRootSpec
-            aggregatedSpec.Interface = iface
-            aggregatedSpec.Rate = "10Gbit" // Default root capacity
+		var list networkingv1alpha1.VlanTrafficControlList
+		if err := k8sClient.List(ctx, &list); err != nil {
+			http.Error(w, "failed listing CRD specs", http.StatusInternalServerError)
+			return
+		}
 
-            for _, item := range list.Items {
-                if item.Spec.HtbRoot.Interface == iface {
-                    aggregatedSpec.Classes = append(aggregatedSpec.Classes, item.Spec.HtbRoot.Classes...)
-                }
-            }
+		var aggregatedSpec networkingv1alpha1.HtbRootSpec
+		aggregatedSpec.Interface = iface
+		aggregatedSpec.Rate = "10Gbit"
 
-            // 2. Perform Netlink Drift Analysis
-            report, err := executor.InspectNodeAlignment(&aggregatedSpec, targetClassID)
-            if err != nil {
-                http.Error(w, fmt.Sprintf("alignment check failed: %v", err), http.StatusInternalServerError)
-                return
-            }
+		hasMatchingPolicy := false
+		for _, item := range list.Items {
+			if !isPolicyTargetingNode(hostNode, nodeName, &item, log) {
+				continue
+			}
 
-            w.Header().Set("Content-Type", "application/json")
-            w.WriteHeader(http.StatusOK)
-            _ = json.NewEncoder(w).Encode(report)
-        })
+			if item.Spec.HtbRoot.Interface == iface {
+				hasMatchingPolicy = true
+				aggregatedSpec.Classes = append(aggregatedSpec.Classes, item.Spec.HtbRoot.Classes...)
+			}
+		}
+
+		if !hasMatchingPolicy {
+			log.Info("[CONFIG] No active VlanTrafficControl policy targets interface on this node", "nodeName", nodeName, "interface", iface)
+		}
+
+		report, err := executor.InspectNodeAlignment(&aggregatedSpec, targetClassID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("alignment check failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(report)
+	})
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -224,30 +239,129 @@ func main() {
 	}
 }
 
-func reconcileLocalTc(k8sClient client.Client, log logr.Logger) {
+func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger) {
 	ctx := context.Background()
-	var list networkingv1alpha1.VlanTrafficControlList
 
+	hostNode := getHostNode(ctx, k8sClient, nodeName, log)
+
+	var list networkingv1alpha1.VlanTrafficControlList
 	if err := k8sClient.List(ctx, &list); err != nil {
 		log.Error(err, "[RECONCILE] Failed listing VlanTrafficControl CRDs")
 		return
 	}
 
-	if len(list.Items) == 0 {
-		log.Info("[RECONCILE] No VlanTrafficControl CRD resources found on cluster")
-		return
-	}
+	specsByInterface := make(map[string]*networkingv1alpha1.HtbRootSpec)
+	strategyByInterface := make(map[string]networkingv1alpha1.TcStrategyType)
+
+	allKnownInterfaces := make(map[string]bool)
 
 	for _, item := range list.Items {
-		log.Info("----------------------------------------------------------------")
-		log.Info("[RECONCILE] Processing CRD instance", "name", item.Name, "interface", item.Spec.HtbRoot.Interface, "classCount", len(item.Spec.HtbRoot.Classes))
+		iface := item.Spec.HtbRoot.Interface
+		if iface == "" {
+			continue
+		}
+		allKnownInterfaces[iface] = true
 
-		strategyUsed, err := executor.ApplyAdaptiveHtbHierarchy(&item.Spec.HtbRoot, item.Spec.TcStrategy, log)
+		if !isPolicyTargetingNode(hostNode, nodeName, &item, log) {
+			log.Info("[RECONCILE] Skipping CRD instance (does not target host node or missing toleration)", "instance", item.Name, "nodeName", nodeName)
+			continue
+		}
+
+		aggSpec, exists := specsByInterface[iface]
+		if !exists {
+			aggSpec = &networkingv1alpha1.HtbRootSpec{
+				Interface:         iface,
+				HtbID:             item.Spec.HtbRoot.HtbID,
+				Rate:              item.Spec.HtbRoot.Rate,
+				DefaultClassMinor: item.Spec.HtbRoot.DefaultClassMinor,
+				Classes:           []networkingv1alpha1.ClassSpec{},
+			}
+			specsByInterface[iface] = aggSpec
+			strategyByInterface[iface] = item.Spec.TcStrategy
+		}
+
+		aggSpec.Classes = append(aggSpec.Classes, item.Spec.HtbRoot.Classes...)
+	}
+
+	for iface := range allKnownInterfaces {
+		if _, targeted := specsByInterface[iface]; !targeted {
+			log.Info("🧹 [RECONCILE] No active policies target this node for interface. Flushing interface TC rules...", "interface", iface)
+			if err := executor.FlushInterface(iface); err != nil {
+				log.Error(err, "[RECONCILE] Failed flushing untargeted interface", "interface", iface)
+			} else {
+				log.Info("✅ [RECONCILE] Interface TC rules successfully flushed", "interface", iface)
+			}
+		}
+	}
+
+	for iface, aggSpec := range specsByInterface {
+		strategy := strategyByInterface[iface]
+		log.Info("----------------------------------------------------------------")
+		log.Info("[RECONCILE] Applying Aggregated Interface Spec", "interface", iface, "totalClasses", len(aggSpec.Classes), "strategy", strategy)
+
+		strategyUsed, err := executor.ApplyAdaptiveHtbHierarchy(aggSpec, strategy, log)
 		if err != nil {
-			log.Error(err, "[RECONCILE] Failed applying TC rules", "instance", item.Name, "strategy", strategyUsed)
+			log.Error(err, "[RECONCILE] Failed applying aggregated TC rules", "interface", iface, "strategy", strategyUsed)
 		} else {
-			log.Info("[RECONCILE] Successfully applied TC rules on host interface", "instance", item.Name, "interface", item.Spec.HtbRoot.Interface, "strategy", strategyUsed)
+			log.Info("[RECONCILE] Successfully applied aggregated TC rules on host interface", "interface", iface, "strategy", strategyUsed)
 		}
 		log.Info("----------------------------------------------------------------")
 	}
+}
+
+func getHostNode(ctx context.Context, k8sClient client.Client, nodeName string, log logr.Logger) *corev1.Node {
+	var hostNode corev1.Node
+	for attempts := 1; attempts <= 5; attempts++ {
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, &hostNode); err == nil && len(hostNode.Labels) > 0 {
+			return &hostNode
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	log.V(1).Info("[WARN] Could not fetch complete host node labels/taints from Kube API", "nodeName", nodeName)
+	return &hostNode
+}
+
+func isPolicyTargetingNode(hostNode *corev1.Node, nodeName string, item *networkingv1alpha1.VlanTrafficControl, log logr.Logger) bool {
+	if hostNode != nil && (len(hostNode.Labels) > 0 || len(hostNode.Spec.Taints) > 0) {
+		return executor.IsPolicyTargetingNode(hostNode, item, log)
+	}
+
+	if len(item.Spec.NodeSelector) == 0 && item.Spec.NodeLabelSelector == nil {
+		return true
+	}
+
+	isMasterName := strings.Contains(nodeName, "master") || strings.Contains(nodeName, "control-plane")
+
+	if isMasterName && len(item.Spec.Tolerations) == 0 {
+		log.Info("[NODE-FILTER-FALLBACK] Rejecting master node due to missing tolerations in fallback mode", "nodeName", nodeName, "crName", item.Name)
+		return false
+	}
+
+	if item.Spec.NodeLabelSelector != nil && item.Spec.NodeLabelSelector.MatchLabels != nil {
+		for reqKey, reqVal := range item.Spec.NodeLabelSelector.MatchLabels {
+			if strings.HasPrefix(reqKey, "node-role.kubernetes.io/") {
+				role := strings.TrimPrefix(reqKey, "node-role.kubernetes.io/")
+				if role != "" && strings.Contains(nodeName, role) {
+					return true
+				}
+			}
+			if reqVal != "" && strings.Contains(nodeName, reqVal) {
+				return true
+			}
+		}
+	}
+
+	for key, expectedVal := range item.Spec.NodeSelector {
+		if strings.HasPrefix(key, "node-role.kubernetes.io/") {
+			role := strings.TrimPrefix(key, "node-role.kubernetes.io/")
+			if role != "" && strings.Contains(nodeName, role) {
+				return true
+			}
+		}
+		if expectedVal != "" && strings.Contains(nodeName, expectedVal) {
+			return true
+		}
+	}
+
+	return false
 }

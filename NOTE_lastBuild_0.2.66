@@ -1,0 +1,66 @@
+===============================================================================
+                       VLAN TRAFFIC CONTROL OPERATOR
+                         RELEASE & BUILD GUIDELINES
+===============================================================================
+
+1. OVERVIEW & SCOPE OF release.sh
+-------------------------------------------------------------------------------
+The `release.sh` script is the SINGLE SOURCE OF TRUTH for publishing official 
+production releases of the VLAN Traffic Control Operator.
+
+Scope of `release.sh`:
+  • Version Bumping: Executes `bump-to-new-version.sh` and syncs image tags across
+    Go code, CRDs, deployment manifests, and OLM bases.
+  • Pre-flight Checks: Validates target version alignment across key files.
+  • Manifest & Bundle Generation: Runs `make generate`, `make manifests`, and 
+    `operator-sdk generate bundle` to produce clean OLM bundle artifacts.
+  • Container Image Build & Push (GHCR):
+      - Operator Manager Image (`vlan-traffic-control-operator:vX.Y.Z`)
+      - Node Agent Image      (`vlan-traffic-control-agent:vX.Y.Z`)
+      - OLM Bundle Image      (`vlan-traffic-control-bundle:vX.Y.Z`)
+  • File-Based Catalog (FBC): Renders `catalog/index.json`, injects display 
+    icons, and builds/pushes the Catalog Index image 
+    (`vlan-traffic-control-catalog:vX.Y.Z`).
+
+
+2. WHEN TO USE release.sh
+-------------------------------------------------------------------------------
+USE release.sh WHEN:
+  ✔ Cutting a new release (e.g., upgrading from v0.2.50 to v0.2.51).
+  ✔ Pushing update catalogs to OpenShift OperatorHub / OLM.
+  ✔ Publishing official container images to GitHub Container Registry (GHCR).
+
+DO NOT USE release.sh FOR:
+  ✖ Daily local Go code debugging or running unit/integration tests.
+  ✖ Quick local CRD/operator testing (use standard `make install` or `make run`).
+
+
+3. PREREQUISITES BEFORE RUNNING
+-------------------------------------------------------------------------------
+  • Authenticated to Container Registry (`podman login ghcr.io`).
+  • `operator-sdk`, `opm`, `podman`, `python3`, and `jq` installed in PATH.
+  • Clean git working state (recommended).
+  • If replacing a failed cluster deployment during testing, clean stale OLM 
+    resources on OpenShift first:
+      $ oc delete csv vlan-traffic-control.v<OLD_VERSION> -n openshift-vlan-tc-operator
+      $ oc delete deployment vlan-traffic-control-manager -n openshift-vlan-tc-operator
+
+
+4. USAGE SYNTAX
+-------------------------------------------------------------------------------
+  Syntax:
+    ./release.sh <OLD_VERSION> <NEW_VERSION>
+
+  Example:
+    ./release.sh 0.2.50 0.2.51
+
+
+5. SCRIPT DEPENDENCIES & CLEANUP
+-------------------------------------------------------------------------------
+  • `bump-to-new-version.sh` : REQUIRED (called automatically in Step 1).
+  • `config/deploy/manager.yaml` : REQUIRED (source manifest for manager deployment).
+  • `config/manifests/bases/vlan-traffic-control.clusterserviceversion.yaml` : 
+    REQUIRED (must have `deployments: []` so OLM bundles generate cleanly).
+  • Note: `build-and-deploy.sh` has been removed from the repository. All 
+    manifest generation and image publishing flow strictly through `release.sh`.
+===============================================================================

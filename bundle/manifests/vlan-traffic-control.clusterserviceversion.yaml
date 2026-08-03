@@ -4,35 +4,43 @@ metadata:
   annotations:
     alm-examples: '[]'
     capabilities: Basic Install
-    createdAt: '2026-08-01T20:21:25Z'
-    description: "The VLAN Traffic Control Operator manages eBPF/TC flower ingress\
-      \ policing \nand HTB egress bandwidth shaping per VLAN directly on OpenShift\
-      \ worker nodes.\n"
+    createdAt: '2026-08-03T09:17:07Z'
+    description: "The VLAN Traffic Control Operator manages eBPF/TC flower ingress policing \nand HTB egress bandwidth shaping per VLAN directly on OpenShift worker nodes.\n"
     operatorframework.io/suggested-namespace: openshift-vlan-tc-operator
     operators.operatorframework.io/builder: operator-sdk-v1.42.3
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
-  name: vlan-traffic-control.v0.2.50
+  name: vlan-traffic-control.v0.2.71
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
-    - description: Advanced VLAN ingress policing and egress HTB traffic control operator
-        for OpenShift.
+    - description: Advanced VLAN ingress policing and egress HTB traffic control operator for OpenShift.
       displayName: VLAN Traffic Control
       kind: VlanTrafficControl
       name: vlantrafficcontrols.networking.med.io
       version: v1alpha1
-  description: Advanced VLAN ingress policing and egress HTB traffic control operator
-    for OpenShift.
+  description: Advanced VLAN ingress policing and egress HTB traffic control operator for OpenShift.
   displayName: VLAN Traffic Control Operator
   icon:
-  - base64data: PHN2ZyBpZD0iTGF5ZXJfMSIgZGF0YS1uYW1lPSJMYXllciAxIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxOTIgMTQ1Ij48ZGVmcz48c3R5bGU+LmNscy0xe2ZpbGw6I2UwMDt9PC9zdHlsZT48L2RlZnM+PHRpdGxlPlJlZEhhdC1Mb2dvLUhhdC1Db2xvcjwvdGl0bGU+PHBhdGggZD0iTTE1Ny43Nyw2Mi42MWExNCwxNCwwLDAsMSwuMzEsMy40MmMwLDE0Ljg4LTE4LjEsMTcuNDYtMzAuNjEsMTcuNDZDNzguODMsODMuNDksNDIuNTMsNTMuMjYsNDIuNTMsNDRhNi40Myw2LjQzLDAsMCwxLC4yMi0xLjk0bC0zLjY2LDkuMDZhMTguNDUsMTguNDUsMCwwLDAtMS41MSw3LjMzYzAsMTguMTEsNDEsNDUuNDgsODcuNzQsNDUuNDgsMjAuNjksMCwzNi40My03Ljc2LDM2LjQzLTIxLjc3LDAtMS4wOCwwLTEuOTQtMS43My0xMC4xM1oiLz48cGF0aCBjbGFzcz0iY2xzLTEiIGQ9Ik0xMjcuNDcsODMuNDljMTIuNTEsMCwzMC42MS0yLjU4LDMwLjYxLTE3LjQ2YTE0LDE0LDAsMCwwLS4zMS0zLjQybC03LjQ1LTMyLjM2Yy0xLjcyLTcuMTItMy4yMy0xMC4zNS0xNS43My0xNi42QzEyNC44OSw4LjY5LDEwMy43Ni41LDk3LjUxLjUsOTEuNjkuNSw5MCw4LDgzLjA2LDhjLTYuNjgsMC0xMS42NC01LjYtMTcuODktNS42LTYsMC05LjkxLDQuMDktMTIuOTMsMTIuNSwwLDAtOC40MSwyMy43Mi05LjQ5LDI3LjE2QTYuNDMsNi40MywwLDAsMCw0Mi41Myw0NGMwLDkuMjIsMzYuMywzOS40NSw4NC45NCwzOS40NU0xNjAsNzIuMDdjMS43Myw4LjE5LDEuNzMsOS4wNSwxLjczLDEwLjEzLDAsMTQtMTUuNzQsMjEuNzctMzYuNDMsMjEuNzdDNzguNTQsMTA0LDM3LjU4LDc2LjYsMzcuNTgsNTguNDlhMTguNDUsMTguNDUsMCwwLDEsMS41MS03LjMzQzIyLjI3LDUyLC41LDU1LC41LDc0LjIyYzAsMzEuNDgsNzQuNTksNzAuMjgsMTMzLjY1LDcwLjI4LDQ1LjI4LDAsNTYuNy0yMC40OCw1Ni43LTM2LjY1LDAtMTIuNzAtMTEtMjcuMTYtMzAuODMtMzUuNzgiLz48L3N2Zz4=
+  - base64data: PHN2ZyBpZD0iTGF5ZXJfMSIgZGF0YS1uYW1lPSJMYXllciAxIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxOTIgMTQ1Ij48ZGVmcz48c3R5bGU+LmNscy0xe2ZpbGw6I2UwMDt9PC9zdHlsZT48L2RlZnM+PHRpdGxlPlJlZEhhdC1Mb2dvLUhhdC1Db2xvcjwvdGl0bGU+PHBhdGggZD0iTTE1Ny43Nyw2Mi42MWExNCwxNCwwLDAsMSwuMzEsMy40MmMwLDE0Ljg4LTE4LjEsMTcuNDYtMzAuNjEsMTcuNDZDNzguODMsODMuNDksNDIuNTMsNTMuMjYsNDIuNTMsNDRhNi40Myw2LjQzLDAsMCwxLC4yMi0xLjk0bC0zLjY6LDkuMDZhMTguNDUsMTguNDUsMCwwLDAtMS41MSw3LjMzYzAsMTguMTEsNDEsNDUuNDgsODcuNzQsNDUuNDgsMjAuNjksMCwzNi40My03Ljc2LDM2LjQzLTIxLjc3LDAtMS4wOCwwLTEuOTQtMS43My0xMC4xM1oiLz48cGF0aCBjbGFzcz0iY2xzLTEiIGQ9Ik0xMjcuNDcsODMuNDljMTIuNTEsMCwzMC42MS0yLjU4LDMwLjYxLTE3LjQ2YTE0LDE0LDAsMCwwLS4zMS0zLjQybC03LjQ1LTMyLjM2Yy0xLjcyLTcuMTItMy4yMy0xMC4zNS0xNS43My0xNi42QzEyNC44OSw4LjY5LDEwMy43Ni41LDk3LjUxLC41LDkxLjYuNSw5MCw4LDgzLjA2LDhjLTYuNjgsMC0xMS42NC01LjYtMTcuODktNS42LTYsMC05LjkxLDQuMDktMTIuOTMsMTIuNSwwLDAtOC40MSwyMy43Mi05LjQ5LDI3LjE2QTYuNDMsNi40MywwLDAsMCw0Mi41Myw0NGMwLDkuMjIsMzYuMywzOS40NSw4NC45NCwzOS40NU0xNjAsNzIuMDdjMS43Myw4LjE5LDEuNzMsOS4wNSwxLjczLDEwLjEzLDAsMTQtMTUuNzQsMjEuNzctMzYuNDMsMjEuNzdDNzguNTQsMTA4LDM3LjU4LDc2LjYsMzcuNTgsNTguNDlhMTguNDUsMTguNDUsMCwwLDEsMS41MS03LjMzQzIyLjI3LDUyLC41LDU1LC41LDc0LjIyYzAsMzEuNDgsNzQuNTksNzAuMjgsMTMzLjY1LDcwLjI4LDQ1LjI4LDAsNTYuNy0yMC40OCw1Ni43LTM2LjY1LDAtMTIuNzAtMTEtMjcuMTYtMzAuODMtMzUuNzgiLz48L3N2Zz4=
     mediatype: image/svg+xml
   install:
     spec:
       clusterPermissions:
       - rules:
+        - apiGroups:
+          - coordination.k8s.io
+          resources:
+          - leases
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
         - apiGroups:
           - security.openshift.io
           resourceNames:
@@ -81,36 +89,61 @@ spec:
         serviceAccountName: vlan-traffic-control-manager
       deployments:
       - label:
+          app: vlan-traffic-control-manager
           control-plane: controller-manager
         name: vlan-traffic-control-manager
         spec:
           replicas: 1
           selector:
             matchLabels:
+              app: vlan-traffic-control-manager
               control-plane: controller-manager
           strategy: {}
           template:
             metadata:
               labels:
+                app: vlan-traffic-control-manager
                 control-plane: controller-manager
             spec:
               containers:
-              - command:
+              - args:
+                - --leader-elect
+                command:
                 - /manager
                 env:
+                - name: WATCH_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['olm.targetNamespaces']
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
                 - name: RELATED_IMAGE_AGENT
-                  value: ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.50
-                image: ghcr.io/rbruzzon73/vlan-traffic-control-operator:v0.2.50
+                  value: ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.71
+                image: ghcr.io/rbruzzon73/vlan-traffic-control-operator:v0.2.71
                 imagePullPolicy: Always
                 name: manager
                 resources:
                   limits:
                     cpu: 500m
-                    memory: 128Mi
+                    memory: 512Mi
                   requests:
-                    cpu: 10m
-                    memory: 64Mi
+                    cpu: 100m
+                    memory: 128Mi
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                    - ALL
               serviceAccountName: vlan-traffic-control-manager
+              tolerations:
+              - effect: NoSchedule
+                key: node-role.kubernetes.io/master
+                operator: Exists
+              - effect: NoSchedule
+                key: node-role.kubernetes.io/control-plane
+                operator: Exists
     strategy: deployment
   installModes:
   - supported: true
@@ -134,8 +167,8 @@ spec:
     name: rbruzzon73
     url: https://github.com/rbruzzon73
   relatedImages:
-  - image: ghcr.io/rbruzzon73/vlan-traffic-control-operator:v0.2.50
+  - image: ghcr.io/rbruzzon73/vlan-traffic-control-operator:v0.2.71
     name: operator
-  - image: ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.50
+  - image: ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.71
     name: agent
-  version: 0.2.50
+  version: 0.2.71

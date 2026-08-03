@@ -1,0 +1,44 @@
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: nad-vlan100
+  namespace: tc-virt-validation
+spec:
+  config: '{
+    "cniVersion": "0.3.1",
+    "name": "nad-vlan100",
+    "type": "bridge",
+    "bridge": "br-vlan100",
+    "macspoofchk": false,
+    "vlan": 0
+  }'
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: nad-vlan280
+  namespace: tc-virt-validation
+spec:
+  config: '{
+    "cniVersion": "0.3.1",
+    "name": "nad-vlan280",
+    "type": "bridge",
+    "bridge": "br-vlan280",
+    "macspoofchk": false,
+    "vlan": 0
+  }'
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: nad-vlan380
+  namespace: tc-virt-validation
+spec:
+  config: '{
+    "cniVersion": "0.3.1",
+    "name": "nad-vlan380",
+    "type": "bridge",
+    "bridge": "br-vlan380",
+    "macspoofchk": false,
+    "vlan": 0
+  }'

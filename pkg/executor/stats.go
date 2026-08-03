@@ -53,7 +53,7 @@ func CollectInterfaceStats(ifaceName string, rootSpec *networkingv1alpha1.HtbRoo
 					}
 				}
 
-				var bytes, pkts, overlimits, lended uint64
+				var bytes, pkts, overlimits uint64
 				if attrs.Statistics != nil {
 					if attrs.Statistics.Basic != nil {
 						bytes = attrs.Statistics.Basic.Bytes
@@ -66,12 +66,10 @@ func CollectInterfaceStats(ifaceName string, rootSpec *networkingv1alpha1.HtbRoo
 
 				stats.ClassStats = append(stats.ClassStats, networkingv1alpha1.ClassStat{
 					ClassID:    classID,
-					Name:       className,
-					Prio:       int(htb.Prio),
+					ClassName:  className,
 					Bytes:      bytes,
 					Packets:    pkts,
-					Overlimits: overlimits,
-					Borrowed:   lended,
+					Overlimits: uint32(overlimits),
 				})
 			}
 		}
@@ -87,7 +85,6 @@ func CollectInterfaceStats(ifaceName string, rootSpec *networkingv1alpha1.HtbRoo
 			}
 
 			filterID := fmt.Sprintf("pref %d", attrs.Priority)
-			classID := fmt.Sprintf("1:%d", attrs.Priority)
 
 			var bytes, pkts, drops uint64
 
@@ -115,7 +112,6 @@ func CollectInterfaceStats(ifaceName string, rootSpec *networkingv1alpha1.HtbRoo
 			}
 
 			stats.IngressStats = append(stats.IngressStats, networkingv1alpha1.IngressStat{
-				ClassID:  classID,
 				FilterID: filterID,
 				Bytes:    bytes,
 				Packets:  pkts,
@@ -175,7 +171,7 @@ func GetInterfaceStatsFiltered(ifaceName string, filterClasses map[string]string
 					className = "default-fallback"
 				}
 
-				var bytes, pkts, overlimits, lended uint64
+				var bytes, pkts, overlimits uint64
 				if attrs.Statistics != nil {
 					if attrs.Statistics.Basic != nil {
 						bytes = attrs.Statistics.Basic.Bytes
@@ -188,12 +184,10 @@ func GetInterfaceStatsFiltered(ifaceName string, filterClasses map[string]string
 
 				stats.ClassStats = append(stats.ClassStats, networkingv1alpha1.ClassStat{
 					ClassID:    classID,
-					Name:       className,
-					Prio:       int(htb.Prio),
+					ClassName:  className,
 					Bytes:      bytes,
 					Packets:    pkts,
-					Overlimits: overlimits,
-					Borrowed:   lended,
+					Overlimits: uint32(overlimits),
 				})
 			}
 		}
@@ -239,7 +233,6 @@ func GetInterfaceStatsFiltered(ifaceName string, filterClasses map[string]string
 			}
 
 			stats.IngressStats = append(stats.IngressStats, networkingv1alpha1.IngressStat{
-				ClassID:  classID,
 				FilterID: filterID,
 				Bytes:    bytes,
 				Packets:  pkts,

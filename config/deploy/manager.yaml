@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vlan-traffic-control-manager
+  namespace: openshift-vlan-tc-operator
+  labels:
+    app: vlan-traffic-control-manager
+    control-plane: controller-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vlan-traffic-control-manager
+      control-plane: controller-manager
+  template:
+    metadata:
+      labels:
+        app: vlan-traffic-control-manager
+        control-plane: controller-manager
+    spec:
+      serviceAccountName: vlan-traffic-control-manager
+      containers:
+        - name: manager
+          image: ghcr.io/rbruzzon73/vlan-traffic-control-operator:v0.2.71
+          imagePullPolicy: Always
+          command:
+            - /manager
+          args:
+            - --leader-elect
+          env:
+            - name: WATCH_NAMESPACE
+              value: ""
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      tolerations:
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"

@@ -2,11 +2,11 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"reflect"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -15,12 +15,14 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "networking.med.io/vlan-traffic-control/api/v1alpha1"
+	"networking.med.io/vlan-traffic-control/pkg/executor"
 )
 
 const (
@@ -78,12 +80,12 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 			logger.Info("Performing finalizer cleanup for VlanTrafficControl", "name", instance.Name)
 
 			// Update condition to signal deletion progress
-			r.updateStatusCondition(&instance, TypeReady, metav1.ConditionFalse, ReasonDeleting, "Deleting TC rules on worker nodes")
+			r.updateStatusCondition(&instance, TypeReady, metav1.ConditionFalse, ReasonDeleting, "Cleaning up TC rules on target node agents")
 			_ = r.Status().Update(ctx, &instance)
 
-			// Execute TC rule cleanup across node agent pods
+			// Execute node-role aware TC rule cleanup across node agent pods
 			if err := r.cleanupNodeTrafficControl(ctx, &instance, targetNamespace); err != nil {
-				logger.Error(err, "Failed to clean up TC rules on worker nodes during CR deletion")
+				logger.Error(err, "Failed to clean up TC rules on node agents during CR deletion")
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, err
 			}
 
@@ -93,7 +95,7 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 				logger.Error(err, "Failed to remove finalizer")
 				return ctrl.Result{}, err
 			}
-			logger.Info("Successfully finalized VlanTrafficControl and wiped node TC rules")
+			logger.Info("Successfully finalized VlanTrafficControl and updated node TC rules")
 
 			// Check if any active VlanTrafficControl CRs remain in the cluster
 			var crList v1alpha1.VlanTrafficControlList
@@ -133,18 +135,22 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 		logger.V(1).Info("Mapped TC Class Handle", "classID", class.ClassID, "classMinor", class.ClassMinor, "fullHandle", classHandle)
 	}
 
-	// 4. Calculate Spec SHA256 Hash to trigger Agent pod restarts on CRD spec changes
-	specBytes, err := json.Marshal(instance.Spec)
-	if err != nil {
-		logger.Error(err, "Failed to marshal spec for hashing")
-		r.updateStatusCondition(&instance, TypeReady, metav1.ConditionFalse, ReasonFailed, "Failed to marshal spec")
-		_ = r.Status().Update(ctx, &instance)
-		return ctrl.Result{}, err
+	// 4. Always allow Agent DaemonSet to span ALL nodes (masters + workers)
+	// Local agents use executor.IsPolicyTargetingNode to evaluate CR targeting dynamically.
+	var aggregatedNodeSelector map[string]string = nil
+	var aggregatedTolerations []corev1.Toleration
+
+	var allCRs v1alpha1.VlanTrafficControlList
+	if err := r.List(ctx, &allCRs); err == nil {
+		for _, cr := range allCRs.Items {
+                    for _, tol := range cr.Spec.Tolerations {
+                        aggregatedTolerations = append(aggregatedTolerations, tol.ToCoreV1())
+                    }
+                }
 	}
-	specHash := fmt.Sprintf("%x", sha256.Sum256(specBytes))
 
 	// 5. Build or Update the Agent DaemonSet Manifest
-	agentDaemonSet := r.buildAgentDaemonSet(&instance, targetNamespace, specHash)
+	agentDaemonSet := r.buildAgentDaemonSet(&instance, targetNamespace, aggregatedNodeSelector, aggregatedTolerations)
 
 	// Bind Agent DaemonSet lifecycle to Operator Deployment for OLM Garbage Collection
 	_ = r.setOperatorDeploymentOwnerRef(ctx, agentDaemonSet, targetNamespace)
@@ -157,10 +163,10 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	var existingDS appsv1.DaemonSet
-	err = r.Get(ctx, client.ObjectKey{Name: agentDaemonSet.Name, Namespace: targetNamespace}, &existingDS)
+	err := r.Get(ctx, client.ObjectKey{Name: agentDaemonSet.Name, Namespace: targetNamespace}, &existingDS)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			logger.Info("Creating Agent DaemonSet across worker nodes", "namespace", targetNamespace)
+			logger.Info("Creating Agent DaemonSet across cluster nodes", "namespace", targetNamespace)
 			if err := r.Create(ctx, agentDaemonSet); err != nil {
 				r.updateStatusCondition(&instance, TypeReady, metav1.ConditionFalse, ReasonFailed, fmt.Sprintf("Failed to create DaemonSet: %v", err))
 				_ = r.Status().Update(ctx, &instance)
@@ -171,31 +177,30 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{}, err
 		}
 	} else {
-		if existingDS.Spec.Template.Annotations == nil {
-			existingDS.Spec.Template.Annotations = make(map[string]string)
-		}
-
 		currentImage := ""
 		if len(existingDS.Spec.Template.Spec.Containers) > 0 {
 			currentImage = existingDS.Spec.Template.Spec.Containers[0].Image
 		}
 		desiredImage := getAgentImage()
 
-		hashChanged := existingDS.Spec.Template.Annotations["networking.med.io/config-hash"] != specHash
+		// Compare actual DaemonSet structure to avoid continuous updates
+		nodeSelectorChanged := !reflect.DeepEqual(existingDS.Spec.Template.Spec.NodeSelector, agentDaemonSet.Spec.Template.Spec.NodeSelector)
+		tolerationsChanged := !reflect.DeepEqual(existingDS.Spec.Template.Spec.Tolerations, agentDaemonSet.Spec.Template.Spec.Tolerations)
 		imageChanged := currentImage != desiredImage
 
-		// Trigger rollout if spec hash, node selector, OR agent container image tag changed
-		if hashChanged || imageChanged {
-			logger.Info("Updating Agent DaemonSet - triggering rolling restart of agent pods",
-				"hashChanged", hashChanged,
+		// ONLY trigger an update if structural fields actually changed
+		if nodeSelectorChanged || tolerationsChanged || imageChanged {
+			logger.Info("Updating Agent DaemonSet - structural changes detected",
+				"nodeSelectorChanged", nodeSelectorChanged,
+				"tolerationsChanged", tolerationsChanged,
 				"imageChanged", imageChanged,
 				"currentImage", currentImage,
 				"desiredImage", desiredImage,
 			)
 
 			existingDS.OwnerReferences = agentDaemonSet.OwnerReferences
-			existingDS.Spec.Template.Annotations["networking.med.io/config-hash"] = specHash
-			existingDS.Spec.Template.Spec.NodeSelector = instance.Spec.NodeSelector
+			existingDS.Spec.Template.Spec.NodeSelector = agentDaemonSet.Spec.Template.Spec.NodeSelector
+			existingDS.Spec.Template.Spec.Tolerations = agentDaemonSet.Spec.Template.Spec.Tolerations
 			if len(existingDS.Spec.Template.Spec.Containers) > 0 {
 				existingDS.Spec.Template.Spec.Containers[0].Image = desiredImage
 			}
@@ -205,17 +210,16 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 				_ = r.Status().Update(ctx, &instance)
 				return ctrl.Result{}, fmt.Errorf("failed to update Agent DaemonSet: %w", err)
 			}
-		} else {
-			// Ensure OwnerReferences stay up to date
-			existingDS.OwnerReferences = agentDaemonSet.OwnerReferences
-			_ = r.Update(ctx, &existingDS)
 		}
 	}
 
-	// 6. Aggregate Performance Metrics from Agent Pods
+	// 6. Notify agent pods to re-sync TC state
+	r.triggerAgentReconcile(ctx, targetNamespace)
+
+	// 7. Aggregate Performance Metrics from Agent Pods
 	r.collectAgentPerformanceStats(ctx, &instance, targetNamespace)
 
-	// 7. Update Status Conditions to Ready
+	// 8. Update Status Conditions to Ready
 	instance.Status.ObservedGeneration = instance.Generation
 	r.updateStatusCondition(&instance, TypeConfigured, metav1.ConditionTrue, ReasonSuccessful, "Agent DaemonSet active")
 	r.updateStatusCondition(&instance, TypeReady, metav1.ConditionTrue, ReasonSuccessful, "Traffic control operator synchronized")
@@ -253,7 +257,7 @@ func (r *VlanTrafficControlReconciler) setOperatorDeploymentOwnerRef(ctx context
 			Kind:               "Deployment",
 			Name:               operatorDep.Name,
 			UID:                operatorDep.UID,
-			BlockOwnerDeletion: nil, // Avoids requiring update/patch permissions on deployment finalizers
+			BlockOwnerDeletion: nil,
 			Controller:         &isController,
 		})
 	}
@@ -285,9 +289,15 @@ func resolveClassHandle(rootHandle int, classID string, classMinor int) string {
 	return fmt.Sprintf("%d:%d", rootHandle, classMinor)
 }
 
-// cleanupNodeTrafficControl issues DELETE requests to agent pods to flush host qdiscs and filters
+// cleanupNodeTrafficControl handles selector-aware deletion of TC rules
 func (r *VlanTrafficControlReconciler) cleanupNodeTrafficControl(ctx context.Context, instance *v1alpha1.VlanTrafficControl, namespace string) error {
 	logger := log.FromContext(ctx)
+
+	// List remaining active CRs in the cluster
+	var allCRs v1alpha1.VlanTrafficControlList
+	if err := r.List(ctx, &allCRs); err != nil {
+		return fmt.Errorf("failed listing CRs during cleanup evaluation: %w", err)
+	}
 
 	var podList corev1.PodList
 	if err := r.List(ctx, &podList, client.InNamespace(namespace), client.MatchingLabels{"app": "vlan-traffic-control-agent"}); err != nil {
@@ -301,21 +311,46 @@ func (r *VlanTrafficControlReconciler) cleanupNodeTrafficControl(ctx context.Con
 			continue
 		}
 
-		url := fmt.Sprintf("http://%s:8080/cleanup?interface=%s", agentPod.Status.PodIP, instance.Spec.HtbRoot.Interface)
-		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
-		if err != nil {
-			logger.Error(err, "Failed to create cleanup request", "node", agentPod.Spec.NodeName)
-			continue
+		// Fetch host Node object to evaluate label/selector targeting
+		var hostNode corev1.Node
+		_ = r.Get(ctx, types.NamespacedName{Name: agentPod.Spec.NodeName}, &hostNode)
+
+		// Determine if ANY remaining active CR still targets THIS SPECIFIC NODE & interface
+		nodeHasRemainingCR := false
+		for _, cr := range allCRs.Items {
+			if cr.Name == instance.Name {
+				continue // Skip the CR currently being deleted
+			}
+			if cr.Spec.HtbRoot.Interface == instance.Spec.HtbRoot.Interface {
+				// Evaluate if remaining CR targets this hostNode via NodeSelector or NodeLabelSelector
+				if executor.IsPolicyTargetingNode(&hostNode, &cr, logger) {
+					nodeHasRemainingCR = true
+					break
+				}
+			}
 		}
 
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			logger.Error(err, "Failed to trigger cleanup on agent pod", "node", agentPod.Spec.NodeName)
-			continue
+		if nodeHasRemainingCR {
+			// Other CRs target this node on this interface -> Re-sync rules without wiping interface
+			url := fmt.Sprintf("http://%s:8080/reconcile", agentPod.Status.PodIP)
+			resp, err := httpClient.Post(url, "application/json", nil)
+			if err == nil {
+				_ = resp.Body.Close()
+			}
+			logger.Info("Triggered selective re-sync on agent pod", "node", agentPod.Spec.NodeName, "interface", instance.Spec.HtbRoot.Interface)
+		} else {
+			// No remaining CR targets this node on this interface -> Flush interface on this node ONLY
+			url := fmt.Sprintf("http://%s:8080/cleanup?interface=%s", agentPod.Status.PodIP, instance.Spec.HtbRoot.Interface)
+			req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+			if err != nil {
+				continue
+			}
+			resp, err := httpClient.Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+			}
+			logger.Info("Flushed interface on node (no remaining CRs target this node)", "node", agentPod.Spec.NodeName, "interface", instance.Spec.HtbRoot.Interface)
 		}
-		_ = resp.Body.Close()
-
-		logger.Info("Successfully triggered TC cleanup on worker node", "node", agentPod.Spec.NodeName, "interface", instance.Spec.HtbRoot.Interface)
 	}
 
 	return nil
@@ -325,12 +360,45 @@ func getAgentImage() string {
 	if img := os.Getenv("RELATED_IMAGE_AGENT"); img != "" {
 		return img
 	}
-	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.50"
+	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.71"
 }
 
-func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(instance *v1alpha1.VlanTrafficControl, namespace, specHash string) *appsv1.DaemonSet {
+func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(
+	instance *v1alpha1.VlanTrafficControl,
+	namespace string,
+	nodeSelector map[string]string,
+	userTolerations []corev1.Toleration,
+) *appsv1.DaemonSet {
 	privilegedVal := true
 	hostPathDir := corev1.HostPathDirectory
+
+	// ALWAYS include Master / Control-Plane base tolerations so agents can schedule on tainted nodes
+	baseTolerations := []corev1.Toleration{
+		{
+			Key:      "node-role.kubernetes.io/master",
+			Operator: corev1.TolerationOpExists,
+			Effect:   corev1.TaintEffectNoSchedule,
+		},
+		{
+			Key:      "node-role.kubernetes.io/control-plane",
+			Operator: corev1.TolerationOpExists,
+			Effect:   corev1.TaintEffectNoSchedule,
+		},
+	}
+
+	// Merge user-defined tolerations without duplicates
+	for _, userTol := range userTolerations {
+		isDuplicate := false
+		for _, baseTol := range baseTolerations {
+			if userTol.Key == baseTol.Key && userTol.Effect == baseTol.Effect {
+				isDuplicate = true
+				break
+			}
+		}
+		if !isDuplicate {
+			baseTolerations = append(baseTolerations, userTol)
+		}
+	}
 
 	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -348,15 +416,13 @@ func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(instance *v1alpha1.Vl
 					Labels: map[string]string{
 						"app": "vlan-traffic-control-agent",
 					},
-					Annotations: map[string]string{
-						"networking.med.io/config-hash": specHash,
-					},
 				},
 				Spec: corev1.PodSpec{
 					HostNetwork:        true,
 					HostPID:            true,
 					ServiceAccountName: "vlan-traffic-control-manager",
-					NodeSelector:       instance.Spec.NodeSelector,
+					NodeSelector:       nodeSelector,
+					Tolerations:        baseTolerations,
 					Containers: []corev1.Container{
 						{
 							Name:            "agent",

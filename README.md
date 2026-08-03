@@ -1330,7 +1330,7 @@ oc logs -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent --tail=1
 
 ## Basic test run results
 
-### Selector & Toleration Verification Suite
+### Selector & Toleration Verification Suite [ PASSED ✅ ]
 
 ```bash
 $ ./test-selectors-and-tolerations.sh 
@@ -1501,7 +1501,96 @@ vlantrafficcontrol.networking.med.io "test-custom-label" deleted
 
 ---
 
-### TC targeting sequence [ PENDING ]
+### TC targeting sequence [ FIX IN PROGRESS ❌ ]
+```bash
+$ ./test-tc-targeting-sequence.sh
+========================================================================
+🚀 Starting Comprehensive 9-Step TC Rule Lifecycle Verification Suite
+Interface Target: enp1s0.100
+Master Verification Node: hub-master01.ocp4-hub.test.com
+Worker Verification Node: hub-worker01.ocp4-hub.test.com
+========================================================================
+🧹 Deleting all existing cluster VlanTrafficControl CRs...
+vlantrafficcontrol.networking.med.io "rule-all-1" deleted
+
+▶ STEP 1: Applying 'rule-all-1' (No node restrictions, targeting ALL nodes)...
+vlantrafficcontrol.networking.med.io/rule-all-1 created
+
+------------------------------------------------------------------------
+🔍 [VERIFICATION] Step 1: First TC rule added to ALL nodes
+Expected User TC Classes -> Workers: 1 | Masters: 1
+------------------------------------------------------------------------
+--> Querying Agent API /stats endpoint...
+    - Node [hub-master03.ocp4-hub.test.com]: 1 user class(es) active
+    - Node [hub-master02.ocp4-hub.test.com]: 1 user class(es) active
+    - Node [hub-worker01.ocp4-hub.test.com]: 1 user class(es) active
+    - Node [hub-master01.ocp4-hub.test.com]: 1 user class(es) active
+    - Node [hub-worker02.ocp4-hub.test.com]: 1 user class(es) active
+    - Node [hub-worker03.ocp4-hub.test.com]: 1 user class(es) active
+--> Kernel Verification ('tc class show dev enp1s0.100')...
+    - Host Kernel [hub-worker01.ocp4-hub.test.com]: 1 user HTB class(es)
+    - Host Kernel [hub-master01.ocp4-hub.test.com]: 1 user HTB class(es)
+✅ TEST STEP PASSED!
+
+▶ STEP 2: Applying 'rule-all-2' (NodeLabelSelector.matchLabels targeting all)...
+vlantrafficcontrol.networking.med.io/rule-all-2 created
+
+------------------------------------------------------------------------
+🔍 [VERIFICATION] Step 2: Second TC rule added to ALL nodes
+Expected User TC Classes -> Workers: 2 | Masters: 2
+------------------------------------------------------------------------
+--> Querying Agent API /stats endpoint...
+    - Node [hub-master03.ocp4-hub.test.com]: 2 user class(es) active
+    - Node [hub-master02.ocp4-hub.test.com]: 2 user class(es) active
+    - Node [hub-worker01.ocp4-hub.test.com]: 2 user class(es) active
+    - Node [hub-master01.ocp4-hub.test.com]: 2 user class(es) active
+    - Node [hub-worker02.ocp4-hub.test.com]: 2 user class(es) active
+    - Node [hub-worker03.ocp4-hub.test.com]: 2 user class(es) active
+--> Kernel Verification ('tc class show dev enp1s0.100')...
+    - Host Kernel [hub-worker01.ocp4-hub.test.com]: 2 user HTB class(es)
+    - Host Kernel [hub-master01.ocp4-hub.test.com]: 2 user HTB class(es)
+✅ TEST STEP PASSED!
+
+▶ STEP 3: Applying 'rule-master-3' (nodeSelector & tolerations for Masters)...
+vlantrafficcontrol.networking.med.io/rule-master-3 created
+
+------------------------------------------------------------------------
+🔍 [VERIFICATION] Step 3: Third TC rule added to MASTER nodes only
+Expected User TC Classes -> Workers: 2 | Masters: 3
+------------------------------------------------------------------------
+--> Querying Agent API /stats endpoint...
+    - Node [hub-master03.ocp4-hub.test.com]: 3 user class(es) active
+    - Node [hub-master02.ocp4-hub.test.com]: 3 user class(es) active
+    - Node [hub-worker01.ocp4-hub.test.com]: 2 user class(es) active
+    - Node [hub-master01.ocp4-hub.test.com]: 3 user class(es) active
+    - Node [hub-worker02.ocp4-hub.test.com]: 2 user class(es) active
+    - Node [hub-worker03.ocp4-hub.test.com]: 2 user class(es) active
+--> Kernel Verification ('tc class show dev enp1s0.100')...
+    - Host Kernel [hub-worker01.ocp4-hub.test.com]: 2 user HTB class(es)
+    - Host Kernel [hub-master01.ocp4-hub.test.com]: 3 user HTB class(es)
+✅ TEST STEP PASSED!
+
+▶ STEP 4: Restricting 'rule-all-1' to target Master nodes exclusively...
+vlantrafficcontrol.networking.med.io/rule-all-1 configured
+
+------------------------------------------------------------------------
+🔍 [VERIFICATION] Step 4: First TC rule removed from WORKER nodes only
+Expected User TC Classes -> Workers: 1 | Masters: 3
+------------------------------------------------------------------------
+--> Querying Agent API /stats endpoint...
+    - Node [hub-master03.ocp4-hub.test.com]: 3 user class(es) active
+    - Node [hub-master02.ocp4-hub.test.com]: 3 user class(es) active
+    - Node [hub-worker01.ocp4-hub.test.com]: 2 user class(es) active
+    - Node [hub-master01.ocp4-hub.test.com]: 3 user class(es) active
+    - Node [hub-worker02.ocp4-hub.test.com]: 2 user class(es) active
+    - Node [hub-worker03.ocp4-hub.test.com]: 2 user class(es) active
+--> Kernel Verification ('tc class show dev enp1s0.100')...
+    - Host Kernel [hub-worker01.ocp4-hub.test.com]: 2 user HTB class(es)
+    - Host Kernel [hub-master01.ocp4-hub.test.com]: 3 user HTB class(es)
+❌ TEST STEP FAILED: State mismatch!
+   Workers: expected=1, api=2, kernel=2
+   Masters: expected=3, api=3, kernel=3
+```
 
 ---
 

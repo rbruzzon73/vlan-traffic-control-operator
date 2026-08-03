@@ -1709,5 +1709,139 @@ vlantrafficcontrol.networking.med.io "rule-worker-3" deleted
 
 ---
 
-### TC rules validations with OCP VMs [ PENDING ]
+### Host Node Bridge - TC rules validations with OCP VMs
+
+- Environment: 
+   - host-node-bridge_nncp-worker01.yaml
+   - host-node-bridge_nncp-worker02.yaml
+   - host-node-bridge_nncp-worker03.yaml
+   - host-node-bridge_nads.yaml
+   - host-node-bridge_vlan-tc-rules.yaml
+   - host-node-bridge_vms.yaml (access via ssh key)
+
+- Basic Script:
+   - run-tc-validation.sh
+
+```bash
+========================================================================
+🧪 EXECUTING FULL MULTI-VLAN ISOLATION & TC VALIDATION SUITE
+========================================================================
+
+========================================================================
+🧪 Testing Isolation on VLAN 100 (enp1s0.100 -> Class 1:100)
+========================================================================
+--> Initial Packet Counters:
+    • enp1s0.100 (Class 1:100): 380 pkts
+    • enp1s0.280 (Class 1:280): 263 pkts
+    • enp1s0.380 (Class 1:380): 289 pkts
+
+--> Injecting 200 ICMP packets from vm-vlan100 (10.0.100.202) to 10.0.100.21...
+
+--> Final Packet Counters & Isolation Verification:
+    ✅ enp1s0.100 [TARGET]: +221 packets (Expected traffic increase)
+    ✅ enp1s0.280 [ISOLATED]: +0 packets (Perfect isolation)
+    ✅ enp1s0.380 [ISOLATED]: +0 packets (Perfect isolation)
+
+🎉 RESULT: VLAN 100 PASSED isolation & TC verification!
+
+========================================================================
+🧪 Testing Isolation on VLAN 280 (enp1s0.280 -> Class 1:280)
+========================================================================
+--> Initial Packet Counters:
+    • enp1s0.100 (Class 1:100): 601 pkts
+    • enp1s0.280 (Class 1:280): 263 pkts
+    • enp1s0.380 (Class 1:380): 289 pkts
+
+--> Injecting 200 ICMP packets from vm-vlan280 (10.0.218.202) to 10.0.218.21...
+
+--> Final Packet Counters & Isolation Verification:
+    ✅ enp1s0.100 [ISOLATED]: +0 packets (Perfect isolation)
+    ✅ enp1s0.280 [TARGET]: +221 packets (Expected traffic increase)
+    ✅ enp1s0.380 [ISOLATED]: +0 packets (Perfect isolation)
+
+🎉 RESULT: VLAN 280 PASSED isolation & TC verification!
+
+========================================================================
+🧪 Testing Isolation on VLAN 380 (enp1s0.380 -> Class 1:380)
+========================================================================
+--> Initial Packet Counters:
+    • enp1s0.100 (Class 1:100): 601 pkts
+    • enp1s0.280 (Class 1:280): 484 pkts
+    • enp1s0.380 (Class 1:380): 289 pkts
+
+--> Injecting 200 ICMP packets from vm-vlan380 (10.0.238.202) to 10.0.238.21...
+
+--> Final Packet Counters & Isolation Verification:
+    ✅ enp1s0.100 [ISOLATED]: +0 packets (Perfect isolation)
+    ✅ enp1s0.280 [ISOLATED]: +0 packets (Perfect isolation)
+    ✅ enp1s0.380 [TARGET]: +221 packets (Expected traffic increase)
+
+🎉 RESULT: VLAN 380 PASSED isolation & TC verification!
+
+========================================================================
+🏁 ALL ISOLATION & TC TESTS COMPLETED
+========================================================================
+```
+
+### Host Node Bridge - Borrowed PKTS
+
+- Environment: 
+   - host-node-bridge_nncp-worker01.yaml
+   - host-node-bridge_nncp-worker02.yaml
+   - host-node-bridge_nncp-worker03.yaml
+   - host-node-bridge_nads.yaml
+   - host-node-bridge_borrow_vlan-tc-rules.yaml
+   - host-node-bridge_vms.yaml (access via ssh key)
+
+- Basic Script:
+   - host-node-bridge_monitor-only.sh
+
+
+HTB regulates traffic using two primary thresholds per class:
+
+* **`egressRate`**: The guaranteed base bandwidth allocated to the VLAN class.
+* **`egressCeil`**: The maximum upper limit (ceiling) the VLAN class is allowed to reach.
+
+- Parent 1:1 root class rate: 5Mbit
+   -  ClassId: "1:100": egressRate: 1Mbit - egressCeil: 5Mbit [ Borrowing enabled ]
+   -  ClassId: "1:280": egressRate: 1Mbit - egressCeil: 1Mbit [ No borrowing permitted ]
+   -  ClassId: "1:380": egressRate: 1Mbit - egressCeil: 1Mbit [ No borrowing permitted ]
+
+
+#### Key Operational Rules
+
+| Condition | Token Borrowing Status | Kernel Behavior |
+| :--- | :--- | :--- |
+| **`Traffic > egressRate`** | **Active (`borrowed > 0`)** | The class borrows unused tokens from the root parent (`htbRoot.rate`) to scale above its guaranteed rate. |
+| **`Traffic > egressCeil`** | **Throttled (`overlimits > 0`)** | Packets exceeding the ceiling rate are delayed/queued by the kernel. Overlimits counters increment rapidly. |
+| **`egressRate == egressCeil`** | **Disabled (`borrowed = 0`)** | The class cannot borrow from the parent root under any circumstances. Traffic above `egressRate` is immediately rate-limited. |
+
+---
+
+### 📊 Real-Time Metric Monitoring
+
+```bash
+./host-node-bridge_monitor-only.sh
+
+```bash
+-----------------------------------------------------------------------------------------------------------------------------------
+TIMESTAMP  | INTERFACE    | CLASS    | TOTAL PKTS | BORROWED PKTS | BORROW %   | DELTA BORROWED | OVERLIMITS | DELTA OVERLIMITS
+-----------------------------------------------------------------------------------------------------------------------------------
+21:09:18   | enp1s0.100   | 1:100    | 95969      | 70312         | 73.3%      | +3291          | 89395      | +4179          
+21:09:18   | enp1s0.280   | 1:280    | 20630      | 0             | 0.0%       | +0             | 17855      | +895           
+21:09:18   | enp1s0.380   | 1:380    | 20494      | 0             | 0.0%       | +0             | 16825      | +674           
+-----------------------------------------------------------------------------------------------------------------------------------
+21:09:26   | enp1s0.100   | 1:100    | 99059      | 72661         | 73.4%      | +2349          | 92382      | +2987          
+21:09:26   | enp1s0.280   | 1:280    | 21290      | 0             | 0.0%       | +0             | 18508      | +653           
+21:09:26   | enp1s0.380   | 1:380    | 21139      | 0             | 0.0%       | +0             | 17454      | +629           
+-----------------------------------------------------------------------------------------------------------------------------------
+21:09:35   | enp1s0.100   | 1:100    | 102509     | 75268         | 73.4%      | +2607          | 95714      | +3332          
+21:09:35   | enp1s0.280   | 1:280    | 22031      | 0             | 0.0%       | +0             | 19238      | +730           
+21:09:35   | enp1s0.380   | 1:380    | 21844      | 0             | 0.0%       | +0             | 18136      | +682           
+-----------------------------------------------------------------------------------------------------------------------------------
+21:09:44   | enp1s0.100   | 1:100    | 106023     | 77952         | 73.5%      | +2684          | 99125      | +3411          
+21:09:44   | enp1s0.280   | 1:280    | 22781      | 0             | 0.0%       | +0             | 19978      | +740           
+21:09:44   | enp1s0.380   | 1:380    | 22664      | 0             | 0.0%       | +0             | 18942      | +806           
+-----------------------------------------------------------------------------------------------------------------------------------
+```
 

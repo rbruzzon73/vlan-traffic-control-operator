@@ -906,12 +906,16 @@ Each agent pod exposes an HTTP telemetry interface on port `8080`:
 ### Querying Telemetry
 
 #### 1. Query All Worker Node Telemetry (via Operator Manager)
-Run this command from inside the cluster manager pod to inspect telemetry across all worker nodes:
+Example of command from inside the cluster manager pod to inspect telemetry across all worker nodes:
 
 ```bash
-for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+# Query worker01 directly for all active sub-interfaces
+WORKER01_IP=$(oc get pod -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[?(@.spec.nodeName=="hub-worker01.ocp4-hub.test.com")].status.podIP}')
+
+for vlan in 180 280 380; do
+  echo "=== Stats for enp1s0.${vlan} ==="
   oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
-    curl -s "http://${pod_ip}:8080/stats?interface=enp1s0" | jq .
+    curl -s "http://${WORKER01_IP}:8080/stats?interface=enp1s0.${vlan}" | jq .classStats
 done
 ```
 

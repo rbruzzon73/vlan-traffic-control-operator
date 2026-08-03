@@ -206,6 +206,7 @@ The `VlanTrafficControl` Custom Resource (`networking.med.io/vlan-traffic-contro
 | Field | Type | Required | Default | Description |
 | :--- | :--- | :---: | :---: | :--- |
 | `nodeSelector` | `map[string]string` | No | `{}` | Map of node labels used to select target worker or infrastructure nodes (e.g., `node-role.kubernetes.io/worker: ""`). |
+| `nodeLabelSelector` | `Object` | No | `[]` | NodeSelector is an optional map of key-value pairs to target specific nodes. |
 | `tolerations` | `[]Toleration` | No | `[]` | List of Kubernetes pod/daemonset tolerations allowing the agent to run on tainted nodes (e.g., master/control-plane or dedicated infra taints). |
 | `reconcileIntervalSeconds` | `integer` | No | `30` | Interval in seconds between node agent reconciliation loops. |
 | `tcStrategy` | `string` | **Yes** | `"flower"` | Default traffic control strategy execution mode. Valid values: `flower`, `u32`, `auto`. |

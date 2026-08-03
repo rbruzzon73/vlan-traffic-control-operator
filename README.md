@@ -1821,9 +1821,6 @@ HTB regulates traffic using two primary thresholds per class:
 ### 📊 Real-Time Metric Monitoring
 
 ```bash
-./host-node-bridge_monitor-only.sh
-
-```bash
 -----------------------------------------------------------------------------------------------------------------------------------
 TIMESTAMP  | INTERFACE    | CLASS    | TOTAL PKTS | BORROWED PKTS | BORROW %   | DELTA BORROWED | OVERLIMITS | DELTA OVERLIMITS
 -----------------------------------------------------------------------------------------------------------------------------------

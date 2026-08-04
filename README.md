@@ -1162,25 +1162,169 @@ curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:380" | jq
 ```
 ---
 
-### Understanding Alignment Drift Statuses (`driftDeltas`)
+### Traffic Control Architecture & Alignment Verification
 
-When a node is misaligned (`isAligned: false`), the `driftDeltas` array provides a granular audit log breaking down the exact mismatch between the `VlanTrafficControl` CRD specification and the live Linux kernel Netlink state.
+This operator manages dual-path Linux Traffic Control (TC) rules on host network interfaces, handling both egress shaping (HTB) and ingress policing (`act_police`).
 
-Each entry in `driftDeltas` follows a structured 4-field schema:
+#### Packet Flow Architecture
 
-```json
-{
-  "targetHandle": "interface br-vlan100",
-  "property": "existence",
-  "expected": "present on host",
-  "actual": "missing device"
-}
+```bash
+                          PACKET FLOW ARCHITECTURE
+                         
+  ========================================================================
+                          INGRESS PATH (RX)
+  ========================================================================
+  
+   Physical Network Interface (e.g., enp1s0)
+                     │
+                     ▼
+       ┌──────────────────────────┐
+       │     qdisc ingress        │  (handle ffff:)
+       └─────────────┬────────────┘
+                     │
+                     ▼
+       ┌──────────────────────────┐
+       │     tc flower filter     │  (Matches VLAN 100, Subnet, Mark, etc.)
+       └─────────────┬────────────┘
+                     │
+                     ▼
+       ┌──────────────────────────┐
+       │   act_police / Rate      │  Exceeds Limit? ──────► [ DROP ] (TC_POLICE_SHOT)
+       └─────────────┬────────────┘
+                     │  Within Rate Limit
+                     ▼
+              [ Host Network ]
+                     │
+                     │  (Processing / Local Sockets / Forwarding)
+                     │
+                     ▼
+  ========================================================================
+                           EGRESS PATH (TX)
+  ========================================================================
+
+       ┌──────────────────────────┐
+       │      qdisc htb 1:        │  (Root Parent Handle 1:0)
+       └─────────────┬────────────┘
+                     │
+                     ▼
+       ┌──────────────────────────┐
+       │     htb class 1:1        │  (Root Link Rate Ceiling: e.g., 10Gbit)
+       └─────────────┬────────────┘
+                     │
+         ┌───────────┼───────────┬───────────┐
+         │           │           │           │
+         ▼           ▼           ▼           ▼
+     Class 1:100 Class 1:280 Class 1:380 Class 1:400  (Guaranteed Rates & Ceilings)
+         │           │           │           │
+         ▼           ▼           ▼           ▼
+     fq_codel    fq_codel    fq_codel     (Direct)   (Child Qdiscs for Bufferbloat)
+         │           │           │           │
+         └───────────┴─────┬─────┴───────────┘
+                           │
+                           ▼
+             Physical Interface (TX Wire)
 ```
 
-* **`targetHandle`**: Identifies the specific host interface, TC class ID, or filter handle being evaluated.
-* **`property`**: The exact parameter or state check under inspection (`existence`, `priority`, `rate`, `ceil`).
-* **`expected`**: The state or value dictated by the `VlanTrafficControl` CRD specification.
-* **`actual`**: The live state or value retrieved directly from the kernel Netlink socket.
+---
+
+#### TC Component Reference
+
+| Direction | Component | TC Type | Purpose in Operator |
+| :--- | :--- | :--- | :--- |
+| **Ingress (RX)** | **Qdisc** | `ingress` (`ffff:`) | Hooks directly into the kernel RX pipeline prior to protocol handling. |
+| | **Filter** | `flower` | Classifies incoming frames by **802.1Q VLAN ID**, **IP Subnet**, or **SKB Mark**. |
+| | **Action** | `act_police` | Enforces rate caps (`ingressRate`) via token bucket policing; drops exceeding packets (`TC_POLICE_SHOT`). |
+| **Egress (TX)** | **Qdisc** | `htb` (`1:0`) | Hierarchical Token Bucket shaper managing outgoing traffic queues. |
+| | **Classes** | `htb class` | Guarantees minimum throughput (`egressRate`) and defines max burst ceilings (`egressCeil`). |
+| | **Leaf Qdiscs**| `fq_codel` | Fair queuing attached to active leaf classes to prevent bufferbloat and optimize latency. |
+
+---
+
+#### Ingress Lifecycle & Reconciliation Matrix
+
+The Agent continuously reconciles the host's Linux TC state against the target `VlanTrafficControl` Custom Resource (CR) spec.
+
+| Scenario | Spec Trigger | Kernel Netlink Actions | Expected Alignment Payload | Verification Method |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. Rule Addition** | `ingressRate` is defined for a class. | • Creates parent `qdisc ingress handle ffff:` if missing.<br>• Installs `flower` filter with `act_police` at target `priority`. | `"isAligned": true`<br>`"ingressPresent": true`<br>`"driftDeltas": []` | `tc filter show dev <iface> ingress` |
+| **2. Rule Update** | `ingressRate` or `ingressBurst` values change. | • Removes stale handle (`netlink.FilterDel`).<br>• Installs updated filter (`netlink.FilterAdd`). | `"isAligned": true`<br>`"ingressPresent": true`<br>`"driftDeltas": []` | `curl -s http://<agent_ip>:8080/stats?interface=<iface>` |
+| **3. Rule Removal** | `ingressRate` removed, or class/CR deleted. | • Removes target filter preference (`netlink.FilterDel`).<br>• If **0** ingress rules remain, deletes `qdisc ingress handle ffff:` (`netlink.QdiscDel`). | `"isAligned": true`<br>`"ingressPresent": false`<br>`"driftDeltas": []` | `tc qdisc show dev <iface>` *(confirm `ingress` absent)* |
+
+---
+
+#### Understanding Alignment Drift Statuses (`driftDeltas`)
+
+When a host node is out of sync (`isAligned: false`), the `driftDeltas` array provides a granular audit log breaking down the exact mismatch between the `VlanTrafficControl` CR specification and the live host kernel Netlink state.
+
+Each entry in `driftDeltas` follows a structured 4-field payload:
+
+    {
+      "targetHandle": "ingress filter pref 1",
+      "property": "existence",
+      "expected": "configured",
+      "actual": "missing"
+    }
+
+| Field | Description |
+| :--- | :--- |
+| **`targetHandle`** | Identifies the specific host interface, HTB class ID (`1:100`), or filter handle (`ingress filter pref 1`) under evaluation. |
+| **`property`** | The specific parameter or structural state being validated (`existence`, `priority`, `rate`, `ceil`, `burst`). |
+| **`expected`** | The target configuration defined in the active `VlanTrafficControl` CR specification. |
+| **`actual`** | The actual live value or presence state returned directly from the host's kernel Netlink socket. |
+
+---
+
+### Troubleshooting & Alignment Verification
+
+#### 1. Audit Cluster-Wide Alignment Status
+
+Execute this bash loop to verify configuration alignment, live kernel filter counts, and telemetry across all worker node agents:
+
+    for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+      node_name=$(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath="{.items[?(@.status.podIP=='${pod_ip}')].spec.nodeName}")
+      
+      # Filter out control-plane/master nodes
+      if [[ "${node_name}" == *"master"* ]]; then continue; fi
+
+      echo "=========================================================================="
+      echo ">>> AUDITING WORKER NODE: ${node_name} (${pod_ip})"
+      echo "=========================================================================="
+
+      # Trigger an immediate reconciliation cycle
+      oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+        curl -s -X POST "http://${pod_ip}:8080/reconcile" > /dev/null
+
+      # Query node configuration and alignment state
+      oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+        curl -s "http://${pod_ip}:8080/config" | jq '{
+          node: .node,
+          isAligned: .isAligned,
+          ingressPresent: .actual.ingressPresent,
+          activeFiltersCount: (.actual.ingressFilters | length),
+          driftDeltasCount: (.driftDeltas | length),
+          driftDeltas: .driftDeltas
+        }'
+
+      # Extract live telemetry metrics
+      oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+        curl -s "http://${pod_ip}:8080/stats?interface=enp1s0" | jq '{
+          node: .node,
+          ingressStats: .ingressStats,
+          classStatsCount: (.classStats | length)
+        }'
+    done
+
+#### 2. Inspect Direct Kernel Objects on Node Agent Pods
+
+Run direct `tc` inspections inside an agent pod to debug low-level Netlink handles:
+
+    AGENT_POD=$(oc get pod -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent --field-selector spec.nodeName=hub-worker01.ocp4-hub.test.com -o jsonpath='{.items[0].metadata.name}')
+
+    # Check Qdiscs (must list 'ingress ffff:' alongside egress 'htb 1:')
+    oc exec -n openshift-vlan-tc-operator ${AGENT_POD} -- tc qdisc show dev enp1s0
+
+    # Inspect active Ingress Policing Flower Filters
+    oc exec -n openshift-vlan-tc-operator ${AGENT_POD} -- tc filter show dev enp1s0 ingress
 
 ---
 

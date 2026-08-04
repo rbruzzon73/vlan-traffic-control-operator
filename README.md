@@ -906,38 +906,64 @@ Each agent pod exposes an HTTP telemetry interface on port `8080`:
 
 ### Querying Telemetry
 
-#### 1. Query All Worker Node Telemetry (via Operator Manager)
-Example of command from inside the cluster manager pod to inspect telemetry across all worker nodes:
+## Querying Telemetry
+
+The Node Agent exposes an HTTP server on port `8080` to provide live Netlink kernel telemetry for egress HTB classes and ingress policing rules.
+
+### 1. Multi-Interface Generic Sweep (No Parameters)
+
+Querying `/stats` without parameters automatically discovers all active managed host interfaces (physical, bonds, and VLAN sub-interfaces) while filtering out unmanaged bridges (`br-ex`) and container `veth` pairs:
 
 ```bash
-# Query worker01 directly for all active sub-interfaces
-WORKER01_IP=$(oc get pod -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[?(@.spec.nodeName=="hub-worker01.ocp4-hub.test.com")].status.podIP}')
+AGENT_IP=$(oc get pod -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[0].status.podIP}')
 
-for vlan in 180 280 380; do
-  echo "=== Stats for enp1s0.${vlan} ==="
-  oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
-    curl -s "http://${WORKER01_IP}:8080/stats?interface=enp1s0.${vlan}" | jq .classStats
-done
-```
-
-#### 2. Query Single VLAN or TC Rule
-Isolate telemetry for a specific VLAN ID (e.g., VLAN 100) or class ID (e.g., `1:100`):
-
-```bash
-# Filter stats for VLAN 100
-curl -s "http://${agent_pod_ip}:8080/stats?interface=enp1s0&vlan=100" | jq .
-
-# Filter stats by Class ID handle
-curl -s "http://${agent_pod_ip}:8080/stats?interface=enp1s0&classId=1:100" | jq .
+oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+  curl -s "http://${AGENT_IP}:8080/stats" | jq .
 ```
 
 ---
 
-### Sample Telemetry Payload (`/stats`)
+### 2. Sweep All Agent Nodes in the Cluster
+
+Audit telemetry across all running Agent Pod IPs sequentially from the Manager execution context:
+
+```bash
+for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+  echo "=========================================================================="
+  echo ">>> TELEMETRY FOR AGENT AT IP: ${pod_ip}"
+  echo "=========================================================================="
+  oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+    curl -s "http://${pod_ip}:8080/stats" | jq .
+done
+```
+
+---
+
+### 3. Target Specific Interfaces, Classes, or Fallback Rules
+
+Isolate telemetry per interface, class handle, or class name:
+
+```bash
+# Query a specific sub-interface
+curl -s "http://${AGENT_IP}:8080/stats?interface=enp1s0.280" | jq .
+
+# Isolate the dynamic default fallback class (.default suffix)
+curl -s "http://${AGENT_IP}:8080/stats?interface=enp1s0.280.default" | jq .
+
+# Filter by human-readable class name
+curl -s "http://${AGENT_IP}:8080/stats?className=default-fallback" | jq .
+
+# Filter by specific HTB Class ID handle
+curl -s "http://${AGENT_IP}:8080/stats?interface=enp1s0&classId=1:100" | jq .
+```
+
+---
+
+### Sample Telemetry Payload (`GET /stats`)
 
 ```json
 {
-  "interface": "enp1s0",
+  "interface": "enp1s0.100",
   "node": "hub-worker03.ocp4-hub.test.com",
   "classStats": [
     {
@@ -962,7 +988,7 @@ curl -s "http://${agent_pod_ip}:8080/stats?interface=enp1s0&classId=1:100" | jq 
   "ingressStats": [
     {
       "classId": "1:100",
-      "filterId": "pref 100",
+      "filterId": "pref 1",
       "bytes": 842100,
       "packets": 5930,
       "drops": 0
@@ -970,14 +996,8 @@ curl -s "http://${agent_pod_ip}:8080/stats?interface=enp1s0&classId=1:100" | jq 
   ]
 }
 ```
-
 ---
 
-yes !
-
-Here is the updated Node Configuration & Alignment Engine section for your README.md, now updated to include the missing host interface drift scenario alongside the fully aligned state example.
-
-Markdown
 ## Node Configuration & Alignment Engine
 
 This section details how the `vlan-traffic-control-agent` DaemonSet performs real-time drift detection and configuration auditing across OpenShift worker nodes. By comparing live kernel qdisc, class, and filter states retrieved via Netlink sockets (`vishvananda/netlink`) against the aggregated target specifications from `VlanTrafficControl` Custom Resources, the engine provides immediate visibility into node configuration alignment and pinpoints specific parameter discrepancies.

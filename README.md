@@ -2563,4 +2563,34 @@ Fetch real-time netlink telemetry for egress classes (bytes, packets, overlimits
   done
   ```
 
+## Openshift VLAN Traffic Control installation in Red Hat OpenShift 4.x (test performed on 4.20)
 
+- Deploy the VLAN Traffic Control Operator from the OpenShift VLAN Traffic Control catalog source within Red Hat OpenShift 4.  
+
+```yaml
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: vlan-traffic-control-catalog
+  # MUST be openshift-marketplace for OperatorHub UI visibility
+  namespace: openshift-marketplace
+spec:
+  displayName: VLAN Traffic Control Operator Catalog
+  publisher: Custom
+  sourceType: grpc
+  image: ghcr.io/rbruzzon73/vlan-traffic-control-catalog:v0.2.94
+  updateStrategy:
+    registryPoll:
+      interval: 30m
+```
+
+- Navigate to the Red Hat OpenShift Web Console, select **Ecosystem > Software Catalog**, and locate the VLAN Traffic Control Operator. 
+
+
+- Verify that the alpha channel and the latest available version are selected, then initiate the installation by clicking **Install**.  
+
+
+- Accept and confirm the default configuration settings on the **Install Operator** page.  
+
+
+- Upon successful installation, click **View Operator** to access and customize the Traffic Control operator settings.

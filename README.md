@@ -206,10 +206,10 @@ The `VlanTrafficControl` Custom Resource (`networking.med.io/vlan-traffic-contro
 | Field | Type | Required | Default | Description |
 | :--- | :--- | :---: | :---: | :--- |
 | `nodeSelector` | `map[string]string` | No | `{}` | Map of node labels used to select target worker or infrastructure nodes (e.g., `node-role.kubernetes.io/worker: ""`). |
-| `nodeLabelSelector` | `Object` | No | `[]` | NodeSelector is an optional map of key-value pairs to target specific nodes. |
-| `tolerations` | `[]Toleration` | No | `[]` | List of Kubernetes pod/daemonset tolerations allowing the agent to run on tainted nodes (e.g., master/control-plane or dedicated infra taints). |
+| `nodeLabelSelector` | `Object` | No | `[]` | Kubernetes label selector matching (`matchLabels` & `matchExpressions`). |
+| `tolerations` | `[]Toleration` | No | `[]` | Pod/daemonset tolerations allowing execution on tainted nodes (e.g., master/control-plane). |
 | `reconcileIntervalSeconds` | `integer` | No | `30` | Interval in seconds between node agent reconciliation loops. |
-| `tcStrategy` | `string` | **Yes** | `"flower"` | Default traffic control strategy execution mode. Valid values: `flower`, `u32`, `auto`. |
+| `tcStrategy` | `string` | **Yes** | `"flower"` | Traffic control strategy execution mode (`flower`, `u32`, `auto`). |
 | `htbRoot` | `HtbRootSpec` | **Yes** | — | Root HTB and interface configuration. |
 
 ### Node Targeting & Taint Tolerations
@@ -229,23 +229,24 @@ The operator provides granular control over which nodes in the cluster receive t
 | `rate` | `string` | **Yes** | — | Total root egress bandwidth rate capacity for the interface (e.g., `10Gbit`). |
 | `defaultClassId` | `string` | No | `"1:99"` | Default HTB class ID where unclassified traffic is routed. |
 | `htbId` | `integer` | No | `1` | Custom HTB root handle ID. |
-| `classes` | `[]VlanClassSpec` | **Yes** | — | List of individual traffic control class definitions configured under this root interface. |
+| `classes` | `[]VlanClassSpec` | **Yes** | — | List of individual traffic control class definitions configured under this root. |
 
 ### `VlanClassSpec` (`spec.htbRoot.classes[]`)
 
 | Field | Type | Required | Default | Description |
 | :--- | :--- | :---: | :---: | :--- |
-| `name` | `string` | No | `""` | Human-readable name or descriptor for this traffic class. |
-| `matchType` | `string` | No | `"auto"` | Classification strategy. Valid values: `vlan`, `subnet`, `mark`, `auto`. |
-| `classId` | `string` | **Yes** | — | Unique HTB minor class identifier on the interface (e.g., `1:100` or `1:280`). Format: `^1:[0-9]+$`. |
+| `name` | `string` | **Yes** | — | Human-readable descriptor mapped 1:1 across egress and ingress filters. |
+| `matchType` | `string` | No | `"auto"` | Classification strategy (`vlan`, `subnet`, `mark`, `auto`). |
+| `classId` | `string` | **Yes** | — | Unique HTB minor class identifier on the interface (e.g., `1:100`). Format: `^1:[0-9]+$`. |
 | `vlanId` | `integer` | Conditional | — | 802.1Q VLAN tag ID (1–4094). **Required** if `matchType` is `vlan`. |
 | `subnet` | `string` | Conditional | — | IPv4 CIDR subnet (e.g., `10.200.0.0/24`). **Required** if `matchType` is `subnet`. |
-| `mark` | `uint32` | Conditional | — | 32-bit SKB buffer mark set by OVS or iptables (e.g., `16`). **Required** if `matchType` is `mark`. |
+| `mark` | `uint32` | Conditional | — | 32-bit SKB mark set by OVS or iptables (e.g., `16`). **Required** if `matchType` is `mark`. |
 | `egressRate` | `string` | **Yes** | — | Guaranteed outbound bandwidth rate (e.g., `50Mbit`, `1Gbit`). |
 | `egressCeil` | `string` | No | `egressRate` | Maximum allowed outbound burst bandwidth ceiling (e.g., `200Mbit`, `10Gbit`). |
 | `egressBurst` | `string` | No | `"1250b"` | Outbound burst buffer size (e.g., `15k`, `30k`). |
-| `ingressRate` | `string` | No | `""` | Hard policing bandwidth cap for incoming interface traffic (e.g., `25Mbit`). |
-| `ingressBurst` | `string` | No | `"100k"` | Incoming policing burst buffer size (e.g., `50k`). |
+| `ingressRate` | `string` | No | `""` | Hard policing bandwidth cap for incoming interface traffic (e.g., `30Mbit`). |
+| `ingressBurst` | `string` | No | `"100k"` | Incoming policing burst buffer size (e.g., `15k`, `50k`). |
+| `ingressAction` | `string` | No | `"drop"` | Action for exceeding traffic. Valid values: **`drop`** (hard drop) or **`pass`** (monitor mode). |
 | `priority` | `integer` | No | `0` | HTB priority and TC filter priority level (1 = Highest Priority, 7 = Lowest Priority). |
 | `enableFqCodel` | `boolean` | No | `true` | Toggles attaching an `fq_codel` leaf qdisc to prevent bufferbloat under heavy load. |
 
@@ -897,10 +898,57 @@ Each agent pod exposes an HTTP telemetry interface on port `8080`:
 
 | Endpoint | Method | Query Parameters | Description |
 | :--- | :--- | :--- | :--- |
-| `/stats` | `GET` | `interface` *(required)*, `vlan` *(optional)*, `classId` *(optional)* | Fetches structured egress (with prio, default class & borrowing) and ingress TC metrics via Netlink sockets. |
-| `/reconcile` | `POST` | *None* | Triggers an immediate local TC rule reconciliation pass on the node. |
+| `/config` | `GET` | `interface` *(required)*, `classId` *(optional)* | Audits live host kernel TC state against desired CRD specifications and returns a structured drift report. |
+| `/stats` | `GET` | `interface` *(optional)*, `vlan` *(optional)*, `classId` *(optional)* | Fetches structured egress (with prio, default class & borrowing) and ingress TC metrics via Netlink sockets. |
+| `/reconcile` | `POST` | `interface` *(optional)* | Triggers an immediate local TC rule reconciliation pass on the node. |
 | `/cleanup` | `DELETE` / `POST` | `interface` *(required)* | Flushes root HTB and ingress policing qdiscs on the node. |
 | `/healthz` | `GET` | *None* | Liveness probe endpoint. |
+
+### Ingress Action Reference
+
+| Action | API Display (`/config`) | Netlink Code | Behavior & Use Case |
+| :--- | :--- | :--- | :--- |
+| **`drop`** | `"police drop"` | `netlink.TC_ACT_SHOT` | **Default / Enforce Mode.** Hard drops exceeding packets immediately to prevent bandwidth exhaustion. |
+| **`pass`** | `"police pass"` | `netlink.TC_ACT_OK` | **Monitor Mode.** Allows exceeding traffic to pass through uninterrupted while recording packet/byte counters. |
+
+### TC Component Reference
+
+| Direction | Component | TC Type | Purpose in Operator |
+| :--- | :--- | :--- | :--- |
+| **Ingress (RX)** | **Qdisc** | `ingress` (`ffff:`) | Hooks directly into the kernel RX pipeline prior to protocol handling. |
+| | **Filter** | `flower` / `fw` / `u32` | Classifies incoming frames by **802.1Q VLAN ID**, **IP Subnet**, or **SKB Mark**. |
+| | **Action** | `act_police` | Enforces rate caps (`ingressRate`) via token bucket policing; drops (`TC_ACT_SHOT`) or passes (`TC_ACT_OK`). |
+| **Egress (TX)** | **Qdisc** | `htb` (`1:0`) | Hierarchical Token Bucket shaper managing outgoing traffic queues. |
+| | **Classes** | `htb class` | Guarantees minimum throughput (`egressRate`) and defines max burst ceilings (`egressCeil`). |
+| | **Leaf Qdiscs**| `fq_codel` | Fair queuing attached to active leaf classes to prevent bufferbloat and optimize latency. |
+
+### Drift Delta Reference Matrix
+
+#### Interface & Qdisc Existence
+
+| Target Handle | Property | Expected | Actual | Description & Root Cause |
+| :--- | :--- | :--- | :--- | :--- |
+| `interface <iface>` | `existence` | `present on host` | `missing device` | Host network bridge or sub-interface does not exist on this worker node (`LinkNotFoundError`). |
+| `qdisc root` | `existence` | `htb` | `missing` | The HTB root qdisc (`1:`) is missing from the interface on the host. |
+| `qdisc ingress` | `existence` | `ingress` | `missing` | The ingress policing qdisc (`ffff:`) was flushed or omitted on the target host interface. |
+
+#### Egress HTB Class Properties (Strict Egress Payload)
+
+| Target Handle | Property | Expected | Actual | Description & Root Cause |
+| :--- | :--- | :--- | :--- | :--- |
+| `class <handle>` | `existence` | `configured` | `missing` | The egress HTB class handle exists in the CRD spec but was not created in the kernel. |
+| `class <handle>` | `existence` | `configured` | `missing (interface <iface> absent)` | Cascading failure reported when an HTB class cannot be verified because the interface is missing. |
+| `class <handle>` | `priority` | `<expected_prio>` | `<actual_prio>` | The class exists in the kernel, but its priority (`prio`) diverges from the CRD spec. |
+| `class <handle>` | `rate` | `<expected_rate>` | `<actual_rate>` | The configured egress committed rate differs from the live Netlink state. |
+| `class <handle>` | `ceil` | `<expected_ceil>` | `<actual_ceil>` | The configured maximum ceiling rate differs from the live Netlink state. |
+
+#### Ingress Filter Properties (Enriched Ingress Payload)
+
+| Target Handle | Property | Expected | Actual | Description & Root Cause |
+| :--- | :--- | :--- | :--- | :--- |
+| `ingress filter pref <prio>` | `existence` | `configured` | `missing` | The ingress policing filter (`fw`, `flower`, or `u32`) associated with this priority handle is missing. |
+| `ingress filter pref <prio>` | `rate` | `<expected_police>` | `<actual_police>` | The policing drop threshold in the kernel does not match the CRD `ingressRate`. |
+| `ingress filter pref <prio>` | `action` | `<expected_action>` | `<actual_action>` | The kernel action (`police drop` vs `police pass`) differs from the CRD `ingressAction`. |
 
 ---
 
@@ -1064,28 +1112,17 @@ curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:380" | jq
     "rate": "10Gbit",
     "classes": [
       {
-        "name": "ovs-marked-flow",
-        "classId": "1:380",
-        "matchType": "mark",
-        "mark": 16,
-        "egressRate": "500Mbit",
-        "egressCeil": "500Mbit",
-        "egressBurst": "50k",
-        "ingressRate": "100Mbit",
-        "ingressBurst": "20k",
-        "priority": 3,
+        "name": "storage-vlan-100",
+        "classId": "1:100",
+        "matchType": "vlan",
+        "vlanId": 100,
+        "egressRate": "50Mbit",
+        "egressCeil": "10Gbit",
+        "ingressRate": "30Mbit",
+        "ingressBurst": "15k",
+        "ingressAction": "drop",
+        "priority": 1,
         "enableFqCodel": true
-      },
-      {
-        "name": "raw-htb-no-fqcodel",
-        "classId": "1:400",
-        "matchType": "auto",
-        "vlanId": 400,
-        "egressRate": "1Gbit",
-        "egressCeil": "2Gbit",
-        "ingressRate": "500Mbit",
-        "priority": 4,
-        "enableFqCodel": false
       }
     ]
   },
@@ -1093,21 +1130,33 @@ curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:380" | jq
     "htbQdiscPresent": true,
     "ingressPresent": true,
     "classes": [
-      { "classId": "1:99" },
-      { "classId": "1:1" },
-      { "classId": "1:380", "priority": 3 },
-      { "classId": "1:400", "priority": 4 }
+      {
+        "name": "storage-vlan-100",
+        "classId": "1:100",
+        "matchType": "vlan",
+        "vlanId": 100,
+        "egressRate": "50Mbit",
+        "egressCeil": "10Gbit",
+        "priority": 1
+      }
     ],
     "ingressFilters": [
       {
-        "priority": 3,
-        "type": "fw",
-        "protocol": 3
-      },
-      {
-        "priority": 4,
+        "priority": 1,
+        "handle": 1,
+        "chain": 0,
         "type": "flower",
-        "protocol": 33024
+        "protocol": 33024,
+        "name": "storage-vlan-100",
+        "matchType": "vlan",
+        "vlanId": 100,
+        "ingressRate": "30Mbit",
+        "ingressBurst": "15k",
+        "action": "police drop",
+        "matches": {
+          "eth_type": "0x8100",
+          "vlan_id": "100"
+        }
       }
     ]
   },
@@ -1133,6 +1182,8 @@ curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:380" | jq
         "egressRate": "50Mbit",
         "egressCeil": "10Gbit",
         "ingressRate": "30Mbit",
+        "ingressBurst": "15k",
+        "ingressAction": "drop",
         "priority": 1,
         "enableFqCodel": true
       }

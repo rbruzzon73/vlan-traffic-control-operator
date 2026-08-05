@@ -848,6 +848,222 @@ class htb 1:100 parent 1:1 leaf 100: prio 1 rate 50Mbit ceil 10Gbit burst 15Kb c
        |  STATUS: [NO TAG] ❌                               |
        +----------------------------------------------------+
 ```
+---
+
+## Open vSwitch (OVS) / OVN-Kubernetes Integration & Architecture [ PENDING ]
+
+This section describes the Traffic Control (TC) configuration, CNI setup, and kernel-level packet flow for managing VM or container traffic traversing Open vSwitch (OVS) integration bridges (br-int / br-ex) managed by OVN-Kubernetes. Because OVS strips hardware 802.1Q tags internally before packets traverse host interfaces, traffic classification relies on IP Subnet (matchType: subnet) matching on source IP for egress and destination IP for ingress.
+
+1. Custom Resource Definition (CRD) Configuration
+Apply the VlanTrafficControl CRD to attach HTB egress shaping and ingress policing to the physical uplink interface (enp1s0) bound to Open vSwitch / OVN-Kubernetes:
+
+```YAML
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: vlan-tc-ovs-subnet200
+spec:
+  htbRoot:
+    interface: enp1s0  # Physical NIC or OVS uplink bond
+    rate: 10Gbit
+    defaultClassId: "1:99"
+    htbId: 1
+    classes:
+    - classId: "1:200"
+      name: ovn-kubevirt-subnet-200
+      priority: 2
+      matchType: subnet
+      subnet: 10.200.0.0/24
+      egressRate: 200Mbit
+      egressCeil: 200Mbit
+      egressBurst: 30k
+      ingressRate: 200Mbit
+      ingressBurst: 30k
+      ingressAction: drop
+      enableFqCodel: true
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  reconcileIntervalSeconds: 30
+  tcStrategy: flower
+```
+
+2. OVN-Kubernetes / Multus Secondary NetworkAttachmentDefinition (NAD)
+The VM connects its secondary interface (eth1) to an OVN-Kubernetes logical switch via Multus using the ovn-k8s-cni overlay plugin:
+
+```YAML
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: ovn-subnet200-nad
+  namespace: default   # Set to your VM's target namespace
+spec:
+  config: |
+    {
+      "cniVersion": "0.4.0",
+      "name": "ovn-subnet200-nad",
+      "type": "ovn-k8s-cni-overlay",
+      "topology": "localnet",
+      "netAttachDefName": "default/ovn-subnet200-nad",
+      "subnets": "10.200.0.0/24"
+    }
+```
+
+3. Verification & Metrics Monitoring
+Check the active class counters on the host uplink interface using oc debug or direct host access:
+
+Bash
+# Query egress HTB class counters for class 1:200 on physical uplink
+```bash
+oc debug node/<worker-node> -- bash -c 'chroot /host tc -s class show dev enp1s0 classid 1:200'
+```
+
+# Query ingress policing counters matching destination IP
+```bash
+oc debug node/<worker-node> -- bash -c 'chroot /host tc -s filter show dev enp1s0 parent ffff:'
+```
+
+Example Command Output
+```Plaintext
+class htb 1:200 parent 1:1 leaf 200: prio 2 rate 200Mbit ceil 200Mbit burst 30Kb cburst 0b
+ Sent 8421094 bytes 59301 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+ lended: 59301 borrowed: 0 giants: 0
+ tokens: 15320 ctokens: 14
+```
+ 
+4. Host Node OVS / OVN-Kubernetes Architecture
+The diagram below illustrates how Open vSwitch (br-int / br-ex) routes overlay traffic internally and where Traffic Control hooks into the physical interface (enp1s0):
+
+```Plaintext
++-----------------------------------------------------------------------------------+
+| HOST NODE (Linux Kernel & Open vSwitch)                                           |
+|                                                                                   |
+|  +-----------------------------------------------------------------------------+  |
+|  | VM Pod (test-vm-ovn200)                                                     |  |
+|  |   Interface: eth1 (10.200.0.50)                                             |  |
+|  +-----------------------------------+-----------------------------------------+  |
+|                                      |                                            |
+|                                      | [VM OUTBOUND / HOST INBOUND]               |
+|                                      v                                            |
+|  +-----------------------------------------------------------------------------+  |
+|  | OPEN VSWITCH INTEGRATION BRIDGE: br-int                                     |  |
+|  |   - Internal OpenFlow pipelines process packet                              |  |
+|  |   - Strips internal Geneve / VLAN tags prior to egress forwarding           |  |
+|  +----------------------------------+------------------------------------------+  |
+|                                     |                                             |
+|                                     | Internal Patch Port (patch-br-int-to-br-ex) |
+|                                     v                                             |
+|  +-----------------------------------------------------------------------------+  |
+|  | OPEN VSWITCH EXTERNAL BRIDGE: br-ex                                         |  |
+|  |                                                                             |  |
+|  |   ===============================================================           |  |
+|  |   |  🎯 TC ATTACHMENT POINT FOR OPERATOR                        |           |  |
+|  |   |  Device: enp1s0 (Host Physical Uplink Port)                 |           |  |
+|  |   |                                                             |           |  |
+|  |   |  1. EGRESS (Root HTB Qdisc handle 1:):                      |           |  |
+|  |   |     - Catches OVS -> Physical Wire outbound traffic         |           |  |
+|  |   |     - Matches: protocol ip flower src_ip 10.200.0.0/24      |           |  |
+|  |   |     - Shape/Rate-Limit: Class 1:200                         |           |  |
+|  |   |                                                             |           |  |
+|  |   |  2. INGRESS (Ingress Qdisc handle ffff:):                   |           |  |
+|  |   |     - Catches Physical Wire -> OVS inbound return traffic   |           |  |
+|  |   |     - Matches: protocol ip flower dst_ip 10.200.0.0/24      |           |  |
+|  |   |     - Police Action: Rate-limit return flow                 |           |  |
+|  |   ===============================================================           |  |
+|  +-----------------------------------+-----------------------------------------+  |
++--------------------------------------|--------------------------------------------+
+                                       |
+                                       | Raw IPv4 Payload traversing Physical NIC
+                                       v
+                     +-----------------------------------+
+                     | Physical Switch / External Router |
+                     | (10.200.0.1 Gateway)              |
+                     +-----------------------------------+
+```
+
+5. Packet Transformation & Tagging Flow
+Because Open vSwitch handles virtual network switching in software and strips internal headers before forwarding frames to host physical interfaces, tc evaluates untagged L3 IP headers matching protocol ip (eth_type ipv4) directly on enp1s0.
+
+Outbound Flow (VM ➔ Switch)
+```Plaintext
+  [1]  +----------------------------------------------------+
+       |  VM POD: test-vm-ovn200 (eth1)                     |
+       |  • Packet State: Raw IPv4 Payload (10.200.0.50)    |
+       |  --------------------------------------------------|
+       |  STATUS: [NO TAG] ❌                               |
+       +-------------------------+--------------------------+
+                                 |
+                                 v
+  [2]  +----------------------------------------------------+
+       |  OVS INTEGRATION BRIDGE: br-int                    |
+       |  • OpenFlow pipeline processes logical flow        |
+       |  • Encapsulates or maps internal OpenFlow metadata |
+       |  --------------------------------------------------|
+       |  STATUS: [OVS INTERNAL METADATA] ⚙️                |
+       +-------------------------+--------------------------+
+                                 |
+                                 |  [OVS Patch Port Forwarding]
+                                 v
+  [3]  +----------------------------------------------------+
+       |  OVS EXTERNAL BRIDGE & PHYSICAL UPLINK: enp1s0     |
+       |                                                    |
+       |  🎯 3a. TC EGRESS ENGINE (Root HTB Qdisc)          |
+       |      • Evaluates raw IP payload on host interface  |
+       |      • Filter Match: protocol ip src 10.200.0.0/24 |
+       |      • Action: Shape rate to Class 1:200 (200Mbit) |
+       |                                                    |
+       |  ------------------------------------------------  |
+       |  STATUS: [UNTAGGED IP PAYLOAD] ❌                  |
+       +-------------------------+--------------------------+
+                                 |
+                                 |  [Wire: Raw IPv4 Frame / External VLAN]
+                                 v
+  [4]  +----------------------------------------------------+
+       |  PHYSICAL SWITCH / GATEWAY (10.200.0.1)            |
+       |  --------------------------------------------------|
+       |  STATUS: [PHYSICAL WIRE] 🌐                        |
+       +----------------------------------------------------+
+```
+Inbound Flow (Switch ➔ VM)
+```Plaintext
+  [4]  +----------------------------------------------------+
+       |  PHYSICAL SWITCH / GATEWAY (10.200.0.1)            |
+       |  --------------------------------------------------|
+       |  STATUS: [PHYSICAL WIRE] 🌐                        |
+       +-------------------------+--------------------------+
+                                 |
+                                 |  [Wire: Incoming Packet to VM]
+                                 v
+  [3]  +----------------------------------------------------+
+       |  PHYSICAL UPLINK INTERFACE: enp1s0                 |
+       |                                                    |
+       |  🎯 3a. TC INGRESS ENGINE (ffff: Police Qdisc)     |
+       |      • Evaluates incoming packet on host interface |
+       |      • Filter Match: protocol ip dst 10.200.0.0/24 |
+       |      • Action: Police return bandwidth (200Mbit)   |
+       |                                                    |
+       |  --------------------------------------------------|
+       |  STATUS: [UNTAGGED IP PAYLOAD] ❌                  |
+       +-------------------------+--------------------------+
+                                 |
+                                 |  [OVS Ingress Processing]
+                                 v
+  [2]  +----------------------------------------------------+
+       |  OVS INTEGRATION BRIDGE: br-int                    |
+       |  • OpenFlow pipeline maps packet to target veth    |
+       |  • Forwards plain IP frame to container veth port  |
+       |  ------------------------------------------------  |
+       |  STATUS: [NO TAG] ❌                               |
+       +-------------------------+--------------------------+
+                                 |
+                                 v
+  [1]  +----------------------------------------------------+
+       |  VM POD: test-vm-ovn200 (eth1)                     |
+       |  • Receives plain ICMP reply / payload             |
+       |  --------------------------------------------------|
+       |  STATUS: [NO TAG] ❌                               |
+       +----------------------------------------------------+
+```
 
 ---
 
@@ -855,15 +1071,11 @@ class htb 1:100 parent 1:1 leaf 100: prio 1 rate 50Mbit ceil 10Gbit burst 15Kb c
 
 ---
 
-## Open vSwitch (OVS) / OVN-Kubernetes Integration & Architecture [ PENDING ]
-
----
-
 ## IPvLAN (L2 / L3 Mode) & Architecture [ PENDING ]
 
 ---
 
-## SR-IOV (Single Root I/O Virtualization) & Architecture [ HW REQUIRED ]
+## SR-IOV (Single Root I/O Virtualization) & Architecture [ HW REQUIRED - POSTPONED ]
 
 - HW reconfiguration required:
 

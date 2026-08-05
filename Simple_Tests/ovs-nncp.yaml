@@ -1,0 +1,13 @@
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: ovn-bridge-subnet200
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  desiredState:
+    ovn:
+      bridge-mappings:
+        - localnet: localnet-subnet200
+          bridge: br-ex
+          state: present

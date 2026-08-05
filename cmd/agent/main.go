@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,12 @@ var (
 func init() {
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = networkingv1alpha1.AddToScheme(scheme)
+}
+
+// Response payload format for multi-interface node sweep (GET /stats without params)
+type NodeMultiInterfaceStatsResponse struct {
+	Node       string                              `json:"node"`
+	Interfaces []networkingv1alpha1.InterfaceStats `json:"interfaces"`
 }
 
 func main() {
@@ -77,23 +84,26 @@ func main() {
 
 	// 4. HTTP /stats Handler
 	http.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
-		iface := r.URL.Query().Get("interface")
-		if iface == "" {
-			iface = "enp1s0"
-		}
+		query := r.URL.Query()
+		rawIfaceParam := query.Get("interface")
+		ifaceParam := strings.TrimSpace(rawIfaceParam)
+		classNameParam := strings.TrimSpace(query.Get("className"))
 
 		var targetVlan int
-		if vlanStr := r.URL.Query().Get("vlan"); vlanStr != "" {
+		if vlanStr := query.Get("vlan"); vlanStr != "" {
 			targetVlan, _ = strconv.Atoi(vlanStr)
 		}
-		targetClassID := r.URL.Query().Get("classId")
+		targetClassID := query.Get("classId")
 
-		log.Info("[API] GET /stats", "clientIP", r.RemoteAddr, "interface", iface, "targetVlan", targetVlan, "targetClassID", targetClassID)
+		log.Info("[API] GET /stats", "clientIP", r.RemoteAddr, "interfaceParam", ifaceParam, "classNameParam", classNameParam, "targetVlan", targetVlan, "targetClassID", targetClassID)
 
 		ctx := context.Background()
 		hostNode := getHostNode(ctx, k8sClient, nodeName, log)
 
+		// Dynamic discovery of Class Names and Default Class Handles per targeting CR
 		classMap := make(map[string]string)
+		defaultClassHandles := make(map[string]bool)
+
 		var list networkingv1alpha1.VlanTrafficControlList
 		if err := k8sClient.List(ctx, &list); err == nil {
 			for _, item := range list.Items {
@@ -105,6 +115,15 @@ func main() {
 				if rootHandle <= 0 {
 					rootHandle = 1
 				}
+
+				// Resolve dynamic default class handle
+				defaultHandle := resolveDefaultClassHandle(&item.Spec.HtbRoot, rootHandle)
+				defaultClassHandles[defaultHandle] = true
+				if _, exists := classMap[defaultHandle]; !exists {
+					classMap[defaultHandle] = "default-fallback"
+				}
+
+				// Map user-defined class names
 				for _, cls := range item.Spec.HtbRoot.Classes {
 					cHandle := cls.GetClassID(rootHandle)
 					if cls.Name != "" {
@@ -114,20 +133,84 @@ func main() {
 			}
 		}
 
-		stats, errStats := executor.GetInterfaceStatsFiltered(iface, classMap, targetVlan, targetClassID)
-		if errStats != nil {
-			log.Error(errStats, "[API] Failed retrieving Netlink stats", "interface", iface)
-			http.Error(w, fmt.Sprintf("failed retrieving stats: %v", errStats), http.StatusInternalServerError)
+		// Fallback default handle if no CR targeting this node
+		if len(defaultClassHandles) == 0 {
+			defaultClassHandles["1:99"] = true
+			classMap["1:99"] = "default-fallback"
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		// CASE 1: Generic GET /stats (No interface parameter specified)
+		if ifaceParam == "" {
+			activeIfaces := discoverActiveTcInterfaces(log)
+			allStats := make([]networkingv1alpha1.InterfaceStats, 0)
+
+			for _, iface := range activeIfaces {
+				st, errStats := executor.GetInterfaceStatsFiltered(iface, classMap, targetVlan, targetClassID)
+				if errStats == nil && st != nil {
+					st.Node = nodeName
+
+					if classNameParam != "" {
+						filteredClasses := make([]networkingv1alpha1.ClassStat, 0)
+						for _, cs := range st.ClassStats {
+							if cs.ClassName == classNameParam {
+								filteredClasses = append(filteredClasses, cs)
+							}
+						}
+						st.ClassStats = filteredClasses
+					}
+
+					if len(st.ClassStats) > 0 || len(st.IngressStats) > 0 {
+						allStats = append(allStats, *st)
+					}
+				}
+			}
+
+			log.Info("[API] GET /stats (generic) completed", "totalActiveInterfaces", len(allStats))
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(NodeMultiInterfaceStatsResponse{
+				Node:       nodeName,
+				Interfaces: allStats,
+			})
 			return
 		}
 
+		// CASE 2: GET /stats?interface=enp1s0.default
+		isDefaultQuery := false
+		if strings.HasSuffix(ifaceParam, ".default") {
+			isDefaultQuery = true
+			ifaceParam = strings.TrimSuffix(ifaceParam, ".default")
+		}
+
+		// CASE 3: Single Interface Query
+		stats, errStats := executor.GetInterfaceStatsFiltered(ifaceParam, classMap, targetVlan, targetClassID)
+		if errStats != nil {
+			log.Error(errStats, "[API] Failed retrieving Netlink stats", "interface", ifaceParam)
+			http.Error(w, fmt.Sprintf("failed retrieving stats: %v", errStats), http.StatusInternalServerError)
+			return
+		}
+		stats.Node = nodeName
+
+		if isDefaultQuery || classNameParam != "" {
+			defaultClasses := make([]networkingv1alpha1.ClassStat, 0)
+			for _, cs := range stats.ClassStats {
+				if isDefaultQuery && (defaultClassHandles[cs.ClassID] || cs.ClassName == "default-fallback") {
+					defaultClasses = append(defaultClasses, cs)
+				} else if classNameParam != "" && cs.ClassName == classNameParam {
+					defaultClasses = append(defaultClasses, cs)
+				}
+			}
+			stats.ClassStats = defaultClasses
+			stats.IngressStats = make([]networkingv1alpha1.IngressStat, 0)
+		}
+
 		log.Info("[API] GET /stats completed",
-			"interface", iface,
+			"interface", ifaceParam,
 			"classesFound", len(stats.ClassStats),
 			"ingressRulesFound", len(stats.IngressStats),
 		)
 
-		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(stats)
 	})
@@ -239,6 +322,71 @@ func main() {
 	}
 }
 
+// Helper: Safely resolve default class handle (e.g. "1:99", "1:254") from HtbRootSpec
+func resolveDefaultClassHandle(root *networkingv1alpha1.HtbRootSpec, rootHandle int) string {
+	if root.DefaultClassID != "" {
+		if strings.Contains(root.DefaultClassID, ":") {
+			return root.DefaultClassID
+		}
+		return fmt.Sprintf("%d:%s", rootHandle, root.DefaultClassID)
+	}
+	defaultMinor := root.DefaultClassMinor
+	if defaultMinor <= 0 {
+		defaultMinor = 99
+	}
+	return fmt.Sprintf("%d:%d", rootHandle, defaultMinor)
+}
+
+// Helper: Discover active host network interfaces relevant for Traffic Control
+func discoverActiveTcInterfaces(log logr.Logger) []string {
+	cmd := exec.Command("tc", "qdisc", "show")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		cmd = exec.Command("chroot", "/host", "tc", "qdisc", "show")
+		out, err = cmd.CombinedOutput()
+		if err != nil {
+			log.Error(err, "[DISCOVER] Failed running tc qdisc show")
+			return []string{}
+		}
+	}
+
+	ifaceMap := make(map[string]bool)
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if f == "dev" && i+1 < len(fields) {
+				iface := fields[i+1]
+
+				if iface == "lo" ||
+					strings.HasPrefix(iface, "genev_") ||
+					strings.HasPrefix(iface, "ovn-k8s") ||
+					strings.HasPrefix(iface, "veth") ||
+					len(iface) >= 15 {
+					continue
+				}
+
+				qdiscType := ""
+				if i >= 1 {
+					qdiscType = fields[i-1]
+				}
+
+				if strings.HasPrefix(iface, "br-") && (qdiscType == "noqueue" || qdiscType == "fq_codel") {
+					continue
+				}
+
+				ifaceMap[iface] = true
+			}
+		}
+	}
+
+	var result []string
+	for iface := range ifaceMap {
+		result = append(result, iface)
+	}
+	return result
+}
+
 func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger) {
 	ctx := context.Background()
 
@@ -273,6 +421,7 @@ func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger)
 				Interface:         iface,
 				HtbID:             item.Spec.HtbRoot.HtbID,
 				Rate:              item.Spec.HtbRoot.Rate,
+				DefaultClassID:    item.Spec.HtbRoot.DefaultClassID,
 				DefaultClassMinor: item.Spec.HtbRoot.DefaultClassMinor,
 				Classes:           []networkingv1alpha1.ClassSpec{},
 			}

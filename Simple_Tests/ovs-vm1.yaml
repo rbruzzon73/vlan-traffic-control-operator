@@ -1,0 +1,50 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: vm-subnet200-1
+  namespace: tc-virt-validation
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: vm-subnet200-1
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: "hub-worker01.ocp4-hub.test.com"
+      domain:
+        devices:
+          disks:
+            - name: containerdisk
+              disk: { bus: virtio }
+            - name: cloudinitdisk
+              disk: { bus: virtio }
+          interfaces:
+            - name: default
+              masquerade: {}
+            - name: secondary
+              bridge: {}
+        resources:
+          requests:
+            memory: 1024Mi
+            cpu: 100m
+      networks:
+        - name: default
+          pod: {}
+        - name: secondary
+          multus:
+            networkName: tc-virt-validation/subnet200-localnet-udn
+      volumes:
+        - name: containerdisk
+          containerDisk:
+            image: quay.io/containerdisks/fedora:latest
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              user: redhat
+              password: ocp4
+              chpasswd: { expire: False }
+              ssh_pwauth: True
+              runcmd:
+                - dnf install -y iperf3 || true

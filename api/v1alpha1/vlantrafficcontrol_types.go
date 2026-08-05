@@ -17,6 +17,15 @@ const (
 	TcStrategyAuto   TcStrategyType = "auto"
 )
 
+// IngressAction defines the action taken on packets exceeding the policed rate limit.
+// +kubebuilder:validation:Enum=drop;pass
+type IngressAction string
+
+const (
+	IngressActionDrop IngressAction = "drop"
+	IngressActionPass IngressAction = "pass"
+)
+
 // TolerationSpec represents pod/CR policy scheduling tolerations (e.g., Master/Control-Plane nodes).
 type TolerationSpec struct {
 	// Key is the taint key that the toleration applies to.
@@ -70,6 +79,10 @@ type ClassSpec struct {
 	// +optional
 	Subnet string `json:"subnet,omitempty"`
 
+	// SKB Mark classifier value (e.g. 16 for OVS marked flows)
+	// +optional
+	Mark uint32 `json:"mark,omitempty"`
+
 	// IP is a single IP address to match.
 	// +optional
 	IP string `json:"ip,omitempty"`
@@ -101,6 +114,15 @@ type ClassSpec struct {
 	// +optional
 	IngressRate string `json:"ingressRate,omitempty"`
 
+	// IngressBurst is the optional burst allowance size for ingress policing.
+	// +optional
+	IngressBurst string `json:"ingressBurst,omitempty"`
+
+	// IngressAction defines the exceeding packet action ("drop" or "pass"). Default is "drop".
+	// +kubebuilder:validation:Enum=drop;pass
+	// +optional
+	IngressAction IngressAction `json:"ingressAction,omitempty"`
+
 	// Priority is the HTB class priority (0-7, lower numbers indicate higher priority).
 	// +optional
 	Priority int `json:"priority,omitempty"`
@@ -115,6 +137,14 @@ func (c *ClassSpec) GetClassID(rootID int) string {
 		rootID = 1
 	}
 	return formatClassHandle(rootID, c.ClassMinor)
+}
+
+// GetIngressAction returns configured action or defaults to "drop".
+func (c *ClassSpec) GetIngressAction() string {
+	if c.IngressAction == IngressActionPass {
+		return "pass"
+	}
+	return "drop"
 }
 
 func formatClassHandle(rootID, minorID int) string {
@@ -178,17 +208,20 @@ type VlanTrafficControlSpec struct {
 // ClassStat defines performance metrics for a single HTB class.
 type ClassStat struct {
 	ClassID    string `json:"classId"`
-	ClassName  string `json:"className,omitempty"`
+	ClassName  string `json:"name,omitempty"`
+	Priority   int    `json:"prio"`
 	Bytes      uint64 `json:"bytes"`
 	Packets    uint64 `json:"packets"`
 	RateBps    uint64 `json:"rateBps,omitempty"`
 	Pps        uint64 `json:"pps,omitempty"`
-	Drops      uint32 `json:"drops,omitempty"`
-	Overlimits uint32 `json:"overlimits,omitempty"`
+	Drops      uint32 `json:"drops"`
+	Overlimits uint32 `json:"overlimits"`
+	Borrowed   uint64 `json:"borrowed"`
 }
 
 // IngressStat defines performance metrics for an ingress policing filter.
 type IngressStat struct {
+	ClassID  string `json:"classId,omitempty"`
 	FilterID string `json:"filterId"`
 	Subnet   string `json:"subnet,omitempty"`
 	Bytes    uint64 `json:"bytes"`
@@ -214,9 +247,21 @@ type ConfigDriftDelta struct {
 
 // FilterMeta represents kernel filter metadata discovered via Netlink.
 type FilterMeta struct {
-	Priority uint16 `json:"priority"`
-	Type     string `json:"type"`
-	Protocol uint16 `json:"protocol"`
+	Priority     uint16            `json:"priority"`
+	Handle       uint32            `json:"handle,omitempty"`       // Netlink filter handle
+	Chain        uint32            `json:"chain,omitempty"`        // Filter chain ID
+	Type         string            `json:"type"`                   // flower, u32, etc.
+	Protocol     uint16            `json:"protocol"`
+	Name         string            `json:"name,omitempty"`         // Associated Class Name (1:1)
+	MatchType    string            `json:"matchType,omitempty"`    // vlan, subnet, mark, auto
+	VlanID       int               `json:"vlanId,omitempty"`       // Matched VLAN tag
+	Subnet       string            `json:"subnet,omitempty"`       // Matched IP CIDR
+	Mark         uint32            `json:"mark,omitempty"`         // Matched mark handle
+	IngressRate  string            `json:"ingressRate,omitempty"`  // Target policed rate
+	PeakRate     string            `json:"peakRate,omitempty"`     // Peak policing rate
+	IngressBurst string            `json:"ingressBurst,omitempty"` // Policed burst buffer
+	Action       string            `json:"action,omitempty"`       // "police drop" or "police pass"
+	Matches      map[string]string `json:"matches,omitempty"`      // Key-value raw filter selectors
 }
 
 // ActualNodeState contains observed live kernel netlink TC state.

@@ -1,0 +1,27 @@
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: vlan-tc-ovs-subnet200
+spec:
+  htbRoot:
+    interface: enp1s0  # Physical NIC or OVS uplink bond
+    rate: 10Gbit
+    defaultClassId: "1:99"
+    htbId: 1
+    classes:
+    - classId: "1:200"
+      name: ovn-kubevirt-subnet-200
+      priority: 2
+      matchType: subnet
+      subnet: 10.200.0.0/24
+      egressRate: 200Mbit
+      egressCeil: 200Mbit
+      egressBurst: 30k
+      ingressRate: 200Mbit
+      ingressBurst: 30k
+      ingressAction: drop
+      enableFqCodel: true
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  reconcileIntervalSeconds: 30
+  tcStrategy: flower

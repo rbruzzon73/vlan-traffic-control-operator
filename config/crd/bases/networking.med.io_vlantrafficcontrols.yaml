@@ -81,6 +81,21 @@ spec:
                           description: EnableFqCodel controls whether fq_codel leaf
                             qdisc is attached to this class.
                           type: boolean
+                        ingressAction:
+                          allOf:
+                          - enum:
+                            - drop
+                            - pass
+                          - enum:
+                            - drop
+                            - pass
+                          description: IngressAction defines the exceeding packet
+                            action ("drop" or "pass"). Default is "drop".
+                          type: string
+                        ingressBurst:
+                          description: IngressBurst is the optional burst allowance
+                            size for ingress policing.
+                          type: string
                         ingressRate:
                           description: IngressRate is the maximum ingress rate limit
                             for traffic policing.
@@ -88,6 +103,11 @@ spec:
                         ip:
                           description: IP is a single IP address to match.
                           type: string
+                        mark:
+                          description: SKB Mark classifier value (e.g. 16 for OVS
+                            marked flows)
+                          format: int32
+                          type: integer
                         matchType:
                           description: 'MatchType defines how traffic is classified:
                             "vlan", "subnet", "ip", "port", or "dscp".'

@@ -8,6 +8,24 @@ import (
 	networkingv1alpha1 "networking.med.io/vlan-traffic-control/api/v1alpha1"
 )
 
+// Helper: Format raw bytes/sec from netlink into human-readable TC rate string
+func formatRateBps(rateBytes uint64) string {
+	if rateBytes == 0 {
+		return ""
+	}
+	bits := rateBytes * 8
+	if bits%1000000000 == 0 {
+		return fmt.Sprintf("%dGbit", bits/1000000000)
+	}
+	if bits%1000000 == 0 {
+		return fmt.Sprintf("%dMbit", bits/1000000)
+	}
+	if bits%1000 == 0 {
+		return fmt.Sprintf("%dkbit", bits/1000)
+	}
+	return fmt.Sprintf("%dbps", bits)
+}
+
 // InspectNodeAlignment checks if the kernel TC state matches the aggregated planned CRD specs.
 func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID string) (*networkingv1alpha1.NodeConfigReport, error) {
 	nodeName := os.Getenv("NODE_NAME")
@@ -34,7 +52,6 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 	// Resolve target network link via Netlink
 	link, err := netlink.LinkByName(desired.Interface)
 	if err != nil {
-		// If interface is missing on this node, mark as misaligned and report the delta!
 		report.IsAligned = false
 		report.DriftDeltas = append(report.DriftDeltas, networkingv1alpha1.ConfigDriftDelta{
 			TargetHandle: fmt.Sprintf("interface %s", desired.Interface),
@@ -43,7 +60,6 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 			Actual:       "missing device",
 		})
 
-		// Also mark all targeted classes as missing due to host interface absence
 		for _, plannedCls := range desired.Classes {
 			classHandle := plannedCls.GetClassID(desired.HtbID)
 			report.DriftDeltas = append(report.DriftDeltas, networkingv1alpha1.ConfigDriftDelta{
@@ -69,7 +85,30 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 		}
 	}
 
-	// 2. Inspect Actual Live Netlink Egress Classes
+	rootHandle := desired.HtbID
+	if rootHandle <= 0 {
+		rootHandle = 1
+	}
+
+	// Helper map to quickly locate desired specs by Class ID
+	desiredClassMap := make(map[string]networkingv1alpha1.ClassSpec)
+	// Helper map to locate desired specs by Priority / Preference
+	desiredPrioMap := make(map[uint16]networkingv1alpha1.ClassSpec)
+
+	for _, cls := range desired.Classes {
+		handle := cls.GetClassID(rootHandle)
+		desiredClassMap[handle] = cls
+
+		prioVal := cls.Priority
+		if prioVal <= 0 {
+			prioVal = cls.ClassMinor
+		}
+		if prioVal > 0 {
+			desiredPrioMap[uint16(prioVal)] = cls
+		}
+	}
+
+	// 2. Inspect Actual Live Netlink Egress Classes (Clean: Egress fields ONLY)
 	liveClasses := make(map[string]*netlink.HtbClass)
 	classes, err := netlink.ClassList(link, netlink.MakeHandle(1, 0))
 	if err == nil {
@@ -77,17 +116,35 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 			if htb, ok := c.(*netlink.HtbClass); ok {
 				classID := netlink.HandleStr(htb.Attrs().Handle)
 				liveClasses[classID] = htb
-				report.Actual.Classes = append(report.Actual.Classes, networkingv1alpha1.ClassSpec{
-					ClassID:  classID,
-					Priority: int(htb.Prio),
-				})
+
+				liveRate := formatRateBps(htb.Rate)
+				liveCeil := formatRateBps(htb.Ceil)
+
+				actualCls := networkingv1alpha1.ClassSpec{
+					ClassID:    classID,
+					Priority:   int(htb.Prio),
+					EgressRate: liveRate,
+					EgressCeil: liveCeil,
+				}
+
+				if desSpec, matched := desiredClassMap[classID]; matched {
+					actualCls.Name = desSpec.Name
+					actualCls.MatchType = desSpec.MatchType
+					actualCls.VlanID = desSpec.VlanID
+					actualCls.Subnet = desSpec.Subnet
+					actualCls.Mark = desSpec.Mark
+
+					if actualCls.EgressRate == "" {
+						actualCls.EgressRate = desSpec.EgressRate
+					}
+					if actualCls.EgressCeil == "" {
+						actualCls.EgressCeil = desSpec.EgressCeil
+					}
+				}
+
+				report.Actual.Classes = append(report.Actual.Classes, actualCls)
 			}
 		}
-	}
-
-	rootHandle := desired.HtbID
-	if rootHandle <= 0 {
-		rootHandle = 1
 	}
 
 	// 3. Validate Planned Egress Classes Against Kernel Netlink State
@@ -121,7 +178,7 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 		}
 	}
 
-	// 4. Inspect & Validate Ingress Policing Filters Across ALL Filter Types (Flower, U32, Fw, etc.)
+	// 4. Inspect & Validate Ingress Policing Filters Across ALL Filter Types
 	filters, err := netlink.FilterList(link, netlink.HANDLE_INGRESS)
 	liveFilters := make(map[uint16]bool)
 	if err == nil {
@@ -132,13 +189,42 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 			}
 
 			liveFilters[attrs.Priority] = true
-			filterType := f.Type()
 
-			report.Actual.IngressFilters = append(report.Actual.IngressFilters, networkingv1alpha1.FilterMeta{
+			var chainVal uint32
+			if attrs.Chain != nil {
+				chainVal = *attrs.Chain
+			}
+
+			meta := networkingv1alpha1.FilterMeta{
 				Priority: attrs.Priority,
-				Type:     filterType,
+				Handle:   attrs.Handle,
+				Chain:    chainVal,
+				Type:     f.Type(),
 				Protocol: attrs.Protocol,
-			})
+				Action:   "police drop",
+				Matches:  make(map[string]string),
+			}
+
+			if flower, ok := f.(*netlink.Flower); ok {
+				if flower.VlanId != 0 {
+					meta.Matches["vlan_id"] = fmt.Sprintf("%d", flower.VlanId)
+					meta.Matches["eth_type"] = fmt.Sprintf("0x%x", flower.EthType)
+				}
+			}
+
+			// Enrich with matching 1:1 class metadata & action
+			if desSpec, matched := desiredPrioMap[attrs.Priority]; matched {
+				meta.Name = desSpec.Name
+				meta.MatchType = desSpec.MatchType
+				meta.VlanID = desSpec.VlanID
+				meta.Subnet = desSpec.Subnet
+				meta.Mark = desSpec.Mark
+				meta.IngressRate = desSpec.IngressRate
+				meta.IngressBurst = desSpec.IngressBurst
+				meta.Action = fmt.Sprintf("police %s", desSpec.GetIngressAction())
+			}
+
+			report.Actual.IngressFilters = append(report.Actual.IngressFilters, meta)
 		}
 	}
 

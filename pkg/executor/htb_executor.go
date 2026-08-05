@@ -64,10 +64,10 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 
 	// Parent class
 	cmdParent := execHostCommand("tc", "class", "change", "dev", iface, "parent", rootHandleStr, "classid", parentClassStr,
-		"htb", "rate", spec.Rate, "ceil", spec.Rate, "burst", "0b", "cburst", "0b")
+		"htb", "rate", spec.Rate, "ceil", spec.Rate)
 	if out, err := cmdParent.CombinedOutput(); err != nil {
 		cmdParentAdd := execHostCommand("tc", "class", "add", "dev", iface, "parent", rootHandleStr, "classid", parentClassStr,
-			"htb", "rate", spec.Rate, "ceil", spec.Rate, "burst", "0b", "cburst", "0b")
+			"htb", "rate", spec.Rate, "ceil", spec.Rate)
 		if outAdd, errAdd := cmdParentAdd.CombinedOutput(); errAdd != nil {
 			log.Info("[HTB] Parent class setup warning", "class", parentClassStr, "output", string(outAdd), "error", errAdd.Error())
 		} else {
@@ -102,7 +102,7 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 
 		burst := c.EgressBurst
 		if burst == "" {
-			burst = "1250b"
+			burst = "15k" // Safe default burst above single packet MTU
 		}
 
 		cmdClassArgs := []string{"tc", "class", "change", "dev", iface, "parent", parentClassStr,
@@ -146,10 +146,21 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 		log.Info("[HTB] Reconciling egress filter rule", "interface", iface, "strategy", desc, "targetClass", classHandle)
 
 		filterParentStr := fmt.Sprintf("%d:0", rootHandle)
-		filterArgs := []string{"tc", "filter", "replace", "dev", iface, "parent", filterParentStr,
-			"protocol", proto, "prio", fmt.Sprintf("%d", filterPrio), "flower"}
-		filterArgs = append(filterArgs, flowerMatch...)
-		filterArgs = append(filterArgs, "flowid", classHandle)
+		
+		var filterArgs []string
+		// Handle 'fw' mark classification vs 'flower' classification CLI structure
+		if proto == "all" && len(flowerMatch) >= 3 && flowerMatch[2] == "fw" {
+			// fw classifier: tc filter replace dev <iface> parent 1:0 protocol all prio <prio> handle <mark> fw flowid 1:400
+			filterArgs = []string{"tc", "filter", "replace", "dev", iface, "parent", filterParentStr,
+				"protocol", proto, "prio", fmt.Sprintf("%d", filterPrio),
+				flowerMatch[0], flowerMatch[1], flowerMatch[2], "flowid", classHandle}
+		} else {
+			// flower classifier: tc filter replace dev <iface> parent 1:0 protocol <proto> prio <prio> flower <matches...> flowid 1:400
+			filterArgs = []string{"tc", "filter", "replace", "dev", iface, "parent", filterParentStr,
+				"protocol", proto, "prio", fmt.Sprintf("%d", filterPrio), "flower"}
+			filterArgs = append(filterArgs, flowerMatch...)
+			filterArgs = append(filterArgs, "flowid", classHandle)
+		}
 
 		cmdFilter := execHostCommand(filterArgs[0], filterArgs[1:]...)
 		if out, err := cmdFilter.CombinedOutput(); err != nil {
@@ -160,7 +171,7 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 	return nil
 }
 
-// PruneOrphanedClasses queries active HTB classes and deletes unreferenced ones
+// PruneOrphanedClasses queries active HTB classes and deletes unreferenced ones safely
 func PruneOrphanedClasses(iface string, rootHandle int, desiredClasses map[string]bool, log logr.Logger) {
 	cmd := execHostCommand("tc", "class", "show", "dev", iface)
 	out, err := cmd.Output()
@@ -185,10 +196,7 @@ func PruneOrphanedClasses(iface string, rootHandle int, desiredClasses map[strin
 			if !desiredClasses[classHandle] {
 				log.Info("🗑️ [PRUNE] Removing orphaned TC class from kernel", "interface", iface, "classHandle", classHandle)
 
-				filterParentStr := fmt.Sprintf("%d:0", rootHandle)
-				cmdDelFilter := execHostCommand("tc", "filter", "del", "dev", iface, "parent", filterParentStr)
-				_ = cmdDelFilter.Run()
-
+				// Selectively delete class (filters targeting this flowid can be safely replaced/flushed)
 				cmdDelClass := execHostCommand("tc", "class", "del", "dev", iface, "classid", classHandle)
 				if outDel, errDel := cmdDelClass.CombinedOutput(); errDel != nil {
 					log.Info("⚠️ [PRUNE] Failed deleting orphaned class", "classHandle", classHandle, "output", string(outDel), "error", errDel.Error())

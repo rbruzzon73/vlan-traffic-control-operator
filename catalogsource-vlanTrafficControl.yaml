@@ -8,7 +8,7 @@ spec:
   displayName: VLAN Traffic Control Operator Catalog
   publisher: Custom
   sourceType: grpc
-  image: ghcr.io/rbruzzon73/vlan-traffic-control-catalog:v0.2.71
+  image: ghcr.io/rbruzzon73/vlan-traffic-control-catalog:v0.2.94
   updateStrategy:
     registryPoll:
       interval: 30m

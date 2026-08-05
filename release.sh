@@ -169,14 +169,17 @@ with open('$CSV_FILE', 'w') as f:
 # 4. Build and Push Controller & Bundle Containers
 # ------------------------------------------------------------------------------
 echo "==> Step 4: Building & pushing operator controller image..."
+#podman build --no-cache -t "${REGISTRY}/vlan-traffic-control-operator:${NEW_TAG}" -f Dockerfile .
 podman build -t "${REGISTRY}/vlan-traffic-control-operator:${NEW_TAG}" -f Dockerfile .
 podman push "${REGISTRY}/vlan-traffic-control-operator:${NEW_TAG}"
 
 echo "==> Step 4b: Building & pushing agent image..."
+#podman build --no-cache -t "${REGISTRY}/vlan-traffic-control-agent:${NEW_TAG}" -f Dockerfile.agent .
 podman build -t "${REGISTRY}/vlan-traffic-control-agent:${NEW_TAG}" -f Dockerfile.agent .
 podman push "${REGISTRY}/vlan-traffic-control-agent:${NEW_TAG}"
 
 echo "==> Step 5: Building & pushing OLM bundle image..."
+#podman build --no-cache -t "${REGISTRY}/vlan-traffic-control-bundle:${NEW_TAG}" -f bundle.Dockerfile .
 podman build -t "${REGISTRY}/vlan-traffic-control-bundle:${NEW_TAG}" -f bundle.Dockerfile .
 podman push "${REGISTRY}/vlan-traffic-control-bundle:${NEW_TAG}"
 
@@ -286,6 +289,7 @@ else:
 opm generate dockerfile catalog
 
 echo "--> Building catalog container image..."
+#podman build --no-cache -t "${REGISTRY}/vlan-traffic-control-catalog:${NEW_TAG}" -f catalog.Dockerfile .
 podman build -t "${REGISTRY}/vlan-traffic-control-catalog:${NEW_TAG}" -f catalog.Dockerfile .
 podman push "${REGISTRY}/vlan-traffic-control-catalog:${NEW_TAG}"
 

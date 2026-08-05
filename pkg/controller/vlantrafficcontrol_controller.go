@@ -360,7 +360,7 @@ func getAgentImage() string {
 	if img := os.Getenv("RELATED_IMAGE_AGENT"); img != "" {
 		return img
 	}
-	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.71"
+	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.94"
 }
 
 func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(

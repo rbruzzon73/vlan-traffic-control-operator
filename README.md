@@ -2586,11 +2586,39 @@ spec:
 
 - Navigate to the Red Hat OpenShift Web Console, select **Ecosystem > Software Catalog**, and locate the VLAN Traffic Control Operator. 
 
+ <p align="left">
+        <em><strong>Figure 1 - Red Hat OpenShift Software Catalog</strong></em><br>
+        <img src="https://github.com/rbruzzon73/vlan-traffic-control-operator/blob/main/OperatorImages/1-VLAN-opratore.jpg" width="850">
+      </p>
+      <br>
 
 - Verify that the alpha channel and the latest available version are selected, then initiate the installation by clicking **Install**.  
 
+ <p align="left">
+        <em><strong>Figure 1 - Operator Installation</strong></em><br>
+        <img src="https://github.com/rbruzzon73/vlan-traffic-control-operator/blob/main/OperatorImages/2-OperatorLastVersion.jpg" width="850">
+      </p>
+      <br>
 
 - Accept and confirm the default configuration settings on the **Install Operator** page.  
 
+ <p align="left">
+        <em><strong>Figure 1 - Default Installation Parameters</strong></em><br>
+        <img src="https://github.com/rbruzzon73/vlan-traffic-control-operator/blob/main/OperatorImages/3-OperatorInstall.jpg" width="850">
+      </p>
+      <br>
 
-- Upon successful installation, click **View Operator** to access and customize the Traffic Control operator settings.
+- Upon successful installation, click **View Operator** to access and customize the VLAN Traffic Control Operator settings.
+
+ <p align="left">
+        <em><strong>Figure 1 - VLAN Traffic Control Operator settings</strong></em><br>
+        <img src="https://github.com/rbruzzon73/vlan-traffic-control-operator/blob/main/OperatorImages/5-OperatorDetails.jpg" width="850">
+      </p>
+      <br>
+
+
+
+
+
+
+

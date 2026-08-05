@@ -1,4 +1,4 @@
-# VLAN Traffic Control Operator - Solution Overview & Technical Architecture (IN PROGRESS)
+# VLAN Traffic Control Operator - Solution Overview & Technical Architecture 
 
 **VLAN Traffic Control Operator** delivers fine-grained, declarative Quality of Service (QoS) and host-level network traffic shaping for OpenShift/Kubernetes clusters.
 

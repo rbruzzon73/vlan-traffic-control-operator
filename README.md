@@ -854,7 +854,7 @@ class htb 1:100 parent 1:1 leaf 100: prio 1 rate 50Mbit ceil 10Gbit burst 15Kb c
 
 This section describes the Traffic Control (TC) configuration, CNI setup, and kernel-level packet flow for managing VM or container traffic traversing Open vSwitch (OVS) integration bridges (br-int / br-ex) managed by OVN-Kubernetes. Because OVS strips hardware 802.1Q tags internally before packets traverse host interfaces, traffic classification relies on IP Subnet (matchType: subnet) matching on source IP for egress and destination IP for ingress.
 
-1. Custom Resource Definition (CRD) Configuration
+### 1. Custom Resource Definition (CRD) Configuration
 Apply the VlanTrafficControl CRD to attach HTB egress shaping and ingress policing to the physical uplink interface (enp1s0) bound to Open vSwitch / OVN-Kubernetes:
 
 ```YAML
@@ -887,7 +887,7 @@ spec:
   tcStrategy: flower
 ```
 
-2. OVN-Kubernetes / Multus Secondary NetworkAttachmentDefinition (NAD)
+### 2. OVN-Kubernetes / Multus Secondary NetworkAttachmentDefinition (NAD)
 The VM connects its secondary interface (eth1) to an OVN-Kubernetes logical switch via Multus using the ovn-k8s-cni overlay plugin:
 
 ```YAML
@@ -908,7 +908,7 @@ spec:
     }
 ```
 
-3. Verification & Metrics Monitoring
+### 3. Verification & Metrics Monitoring
 Check the active class counters on the host uplink interface using oc debug or direct host access:
 
 Bash
@@ -931,7 +931,7 @@ class htb 1:200 parent 1:1 leaf 200: prio 2 rate 200Mbit ceil 200Mbit burst 30Kb
  tokens: 15320 ctokens: 14
 ```
  
-4. Host Node OVS / OVN-Kubernetes Architecture
+### 4. Host Node OVS / OVN-Kubernetes Architecture
 The diagram below illustrates how Open vSwitch (br-int / br-ex) routes overlay traffic internally and where Traffic Control hooks into the physical interface (enp1s0):
 
 ```Plaintext
@@ -981,7 +981,7 @@ The diagram below illustrates how Open vSwitch (br-int / br-ex) routes overlay t
                      +-----------------------------------+
 ```
 
-5. Packet Transformation & Tagging Flow
+### 5. Packet Transformation & Tagging Flow
 Because Open vSwitch handles virtual network switching in software and strips internal headers before forwarding frames to host physical interfaces, tc evaluates untagged L3 IP headers matching protocol ip (eth_type ipv4) directly on enp1s0.
 
 Outbound Flow (VM ➔ Switch)

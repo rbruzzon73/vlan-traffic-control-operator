@@ -314,6 +314,7 @@ spec:
         egressBurst: "15k"
         ingressRate: "25Mbit"
         ingressBurst: "50k"
+        ingressAction: "drop"
         enableFqCodel: true
 
       # -----------------------------------------------------------------------
@@ -331,6 +332,7 @@ spec:
         egressBurst: "30k"
         ingressRate: "200Mbit"
         ingressBurst: "30k"
+        ingressAction: "drop"
         enableFqCodel: true
 
       # -----------------------------------------------------------------------
@@ -347,6 +349,7 @@ spec:
         egressBurst: "50k"
         ingressRate: "100Mbit"
         ingressBurst: "20k"
+        ingressAction: "drop"
         enableFqCodel: true
 
       # -----------------------------------------------------------------------
@@ -361,6 +364,7 @@ spec:
         egressRate: "1Gbit"
         egressCeil: "2Gbit"
         ingressRate: "500Mbit"
+        ingressAction: "drop"
         enableFqCodel: false
 ```
 
@@ -398,6 +402,7 @@ spec:
       egressBurst: 15k
       ingressRate: 30Mbit
       ingressBurst: 50k
+      ingressAction: drop
       enableFqCodel: true
   nodeSelector:
     node-role.kubernetes.io/worker: ""

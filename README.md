@@ -2588,7 +2588,7 @@ spec:
 
  <p align="left">
         <em><strong>Figure 1 - Red Hat OpenShift Software Catalog</strong></em><br>
-        <img src="https://github.com/rbruzzon73/vlan-traffic-control-operator/blob/main/OperatorImages/1-VLAN-opratore.jpg" width="850">
+        <img src="OperatorImages/1-VLAN-opratore.jpg" width="850">
       </p>
       <br>
 
@@ -2596,7 +2596,7 @@ spec:
 
  <p align="left">
         <em><strong>Figure 1 - Operator Installation</strong></em><br>
-        <img src="https://github.com/rbruzzon73/vlan-traffic-control-operator/blob/main/OperatorImages/2-OperatorLastVersion.jpg" width="850">
+        <img src="OperatorImages/2-OperatorLastVersion.jpg" width="850">
       </p>
       <br>
 
@@ -2604,7 +2604,7 @@ spec:
 
  <p align="left">
         <em><strong>Figure 1 - Default Installation Parameters</strong></em><br>
-        <img src="https://github.com/rbruzzon73/vlan-traffic-control-operator/blob/main/OperatorImages/3-OperatorInstall.jpg" width="850">
+        <img src="OperatorImages/3-OperatorInstall.jpg" width="850">
       </p>
       <br>
 
@@ -2612,7 +2612,7 @@ spec:
 
  <p align="left">
         <em><strong>Figure 1 - VLAN Traffic Control Operator settings</strong></em><br>
-        <img src="https://github.com/rbruzzon73/vlan-traffic-control-operator/blob/main/OperatorImages/5-OperatorDetails.jpg" width="850">
+        <img src="OperatorImages/5-OperatorDetails.jpg" width="850">
       </p>
       <br>
 

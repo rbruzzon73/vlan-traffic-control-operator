@@ -1108,45 +1108,6 @@ Inbound Return Flow (VM2 on worker02 ➔ VM1 on worker01)
 
 ---
 
-## MACVLAN (Physical) & Architecture [ PENDING ]
-
----
-
-NOTES:
-
-virtualized workloads (VMs) attached via Multus MACVLAN CNI directly to a bare physical interface (e.g., ens15f1np1), without an intermediate 802.1Q VLAN sub-interface (such as ens15f1np1.100).
-
-   When MACVLAN is attached directly to a parent NIC (ens15f1np1):
-
-   - No VLAN Tagging: Outgoing Ethernet frames pass through the root NIC as untagged IPv4/IPv6 payloads.
-
-   - TC Filter Mismatch: Any TC rule matching protocol 802.1Q vlan_id <ID> will fail to match, because no 802.1Q header exists on the physical wire.
-
-   - OVS Bypass: MACVLAN operates in the Linux kernel network stack, completely bypassing Open vSwitch (br-int / br-ex) and standard OVN pipelines.
-
-To rate-limit untagged MACVLAN traffic on a bare physical interface, the TC engine must evaluate the inner Layer 3 (IP Subnet) or Layer 2 (Source MAC) attributes instead of 802.1Q headers
-
-
-## IPvLAN (L2 / L3 Mode) & Architecture [ PENDING ]
-
----
-
-## SR-IOV (Single Root I/O Virtualization) & Architecture [ HW REQUIRED - POSTPONED ]
-
-- HW reconfiguration required:
-
-   ~~~
-   [root@rbruzzon-platinum vlan-traffic-control-operator]# for iface in /sys/class/net/*; do
-    if [ -f "$iface/device/sriov_totalvfs" ]; then
-        echo "$(basename $iface) SUPPORTS SR-IOV! Max VFs: $(cat $iface/device/sriov_totalvfs)"
-    fi
-   done
-   
-   eno1 SUPPORTS SR-IOV! Max VFs: 32
-   eno2 SUPPORTS SR-IOV! Max VFs: 32
-   ~~~
-
----
 
 ## OpenShift Cluster Metrics & Ingress Filter Observability
 
@@ -2616,8 +2577,45 @@ spec:
       </p>
       <br>
 
+---
+---
 
+> [!NOTE]
+> **Roadmap Item**: The features below are planned for future versions.
 
+### ⏳ MACVLAN (Physical) & Architecture — *[ PENDING ]*
+
+- **Target Release:** v1.1.0 (Planned)
+- **Status:** Architecture draft complete; awaiting TC inner L2/L3 filter implementation.
+
+#### Implementation Notes
+Virtualized workloads (VMs) attached via Multus MACVLAN CNI directly to a bare physical interface (e.g., `ens15f1np1`), without an intermediate 802.1Q VLAN sub-interface (such as `ens15f1np1.100`).
+
+When MACVLAN is attached directly to a parent NIC (`ens15f1np1`):
+- **No VLAN Tagging:** Outgoing Ethernet frames pass through the root NIC as untagged IPv4/IPv6 payloads.
+- **TC Filter Mismatch:** Any TC rule matching protocol `802.1Q vlan_id <ID>` will fail to match because no 802.1Q header exists on the physical wire.
+- **OVS Bypass:** MACVLAN operates in the Linux kernel network stack, completely bypassing Open vSwitch (`br-int` / `br-ex`) and standard OVN pipelines.
+
+> **Approach:** To rate-limit untagged MACVLAN traffic on a bare physical interface, the TC engine must evaluate the inner Layer 3 (IP Subnet) or Layer 2 (Source MAC) attributes instead of 802.1Q headers.
+
+---
+
+### ⏳ SR-IOV (Single Root I/O Virtualization) — *[ HW REQUIRED / POSTPONED ]*
+
+- **Target Release:** TBD (Requires Hardware Environment)
+- **Status:** Pending dedicated SR-IOV hardware testbed.
+
+#### Pre-requisites (HW Verification)
+```bash
+for iface in /sys/class/net/*; do
+ if [ -f "$iface/device/sriov_totalvfs" ]; then
+     echo "$(basename$iface) SUPPORTS SR-IOV! Max VFs: $(cat$iface/device/sriov_totalvfs)"
+ fi
+done
+
+# Output:
+# eno1 SUPPORTS SR-IOV! Max VFs: 32
+# eno2 SUPPORTS SR-IOV! Max VFs: 32
 
 
 

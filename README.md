@@ -2302,8 +2302,8 @@ TIMESTAMP  | INTERFACE    | CLASS    | TOTAL PKTS | BORROWED PKTS | BORROW %   |
 
 This appendix provides handy shell one-liners and loops for inspecting node alignment, extracting active TC configurations, triggering manual reconciliations, viewing operator logs, and auditing live traffic metrics.
 
-[!NOTE]
-**Please note that these examples should be customized to suit the specific environment involved.**
+> [!NOTE]
+> **Please note that these examples should be customized to suit the specific environment involved.**
 
 ---
 

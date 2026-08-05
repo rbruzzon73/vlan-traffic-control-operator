@@ -2585,7 +2585,7 @@ spec:
 
 ### ⏳ MACVLAN (Physical) & Architecture — *[ PENDING ]*
 
-- **Target Release:** v1.1.0 (Planned)
+- **Target Release:** TBD 
 - **Status:** Architecture draft complete; awaiting TC inner L2/L3 filter implementation.
 
 #### Implementation Notes
@@ -2600,7 +2600,7 @@ When MACVLAN is attached directly to a parent NIC (`ens15f1np1`):
 
 ---
 
-### ⏳ SR-IOV (Single Root I/O Virtualization) — *[ HW REQUIRED / POSTPONED ]*
+### ⏳ SR-IOV (Single Root I/O Virtualization) — *[ PENDING ]*
 
 - **Target Release:** TBD (Requires Hardware Environment)
 - **Status:** Pending dedicated SR-IOV hardware testbed.

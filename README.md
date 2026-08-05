@@ -2067,3 +2067,232 @@ TIMESTAMP  | INTERFACE    | CLASS    | TOTAL PKTS | BORROWED PKTS | BORROW %   |
 -----------------------------------------------------------------------------------------------------------------------------------
 ```
 
+---
+
+## Appendix: Useful Operational & Troubleshooting Commands
+
+This appendix provides handy shell one-liners and loops for inspecting node alignment, extracting active TC configurations, triggering manual reconciliations, viewing operator logs, and auditing live traffic metrics.
+
+---
+
+### A.1. Check Node Configuration Alignment
+
+Verify whether target worker nodes match the desired `VlanTrafficControl` CR specification and inspect drift deltas.
+
+* **Single Node (`hub-worker01`):**
+
+  ```bash
+    WORKER1_IP=$(oc get pod -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent --field-selector spec.nodeName=hub-worker01.ocp4-hub.test.com -o jsonpath='{.items[0].status.podIP}')
+
+    oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+      curl -s "http://${WORKER1_IP}:8080/config?interface=enp1s0" | jq '{node: .node, isAligned: .isAligned, driftDeltas: .driftDeltas}'
+  ```
+
+* **All Worker Nodes:**
+
+  ```bash
+  for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+    node_name=$(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath="{.items[?(@.status.podIP=='${pod_ip}')].spec.nodeName}")
+    if [[ "${node_name}" == *"master"* ]]; then continue; fi
+  
+    oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+      curl -s "http://${pod_ip}:8080/config?interface=enp1s0" | jq '{node: .node, isAligned: .isAligned, driftDeltas: .driftDeltas}'
+  done
+  ```
+  
+
+### A.2. Extract Complete Node Configuration (Ingress + Egress)
+Dump the full desired vs. actual kernel TC state returned by the Node Agent's /config endpoint.
+
+* **Single Node (hub-worker01):**
+
+  ```bash
+  WORKER1_IP=$(oc get pod -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent --field-selector spec.nodeName=hub-worker01.ocp4-hub.test.com -o jsonpath='{.items[0].status.podIP}')
+  
+  oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+    curl -s "http://${WORKER1_IP}:8080/config?interface=enp1s0" | jq .
+  ```
+
+* **All Worker Nodes:**
+
+  ```bash
+  for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+    node_name=$(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath="{.items[?(@.status.podIP=='${pod_ip}')].spec.nodeName}")
+    if [[ "${node_name}" == *"master"* ]]; then continue; fi
+  
+    echo "=== Node: ${node_name} ==="
+    oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+      curl -s "http://${pod_ip}:8080/config?interface=enp1s0" | jq .
+  done
+  ```
+
+### A.3. Extract Ingress Configuration Only
+Isolate policing rules, match criteria, handles, and actions (police drop / police pass) on the ingress qdisc.
+
+* **Single Node (hub-worker01):**
+
+  ```bash
+  WORKER1_IP=$(oc get pod -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent --field-selector spec.nodeName=hub-worker01.ocp4-hub.test.com -o jsonpath='{.items[0].status.podIP}')
+
+  oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+    curl -s "http://${WORKER1_IP}:8080/config?interface=enp1s0" | jq '{node: .node, ingressPresent: .actual.ingressPresent, ingressFilters: .actual.ingressFilters}'
+  ```
+
+* **All Worker Nodes:**
+
+  ```bash
+  for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+    node_name=$(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath="{.items[?(@.status.podIP=='${pod_ip}')].spec.nodeName}")
+    if [[ "${node_name}" == *"master"* ]]; then continue; fi
+  
+    oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+      curl -s "http://${pod_ip}:8080/config?interface=enp1s0" | jq '{node: .node, ingressPresent: .actual.ingressPresent, ingressFilters: .actual.ingressFilters}'
+  done
+  ```
+
+### A.4. Extract Egress Configuration Only
+Inspect the active HTB qdisc presence, class hierarchy, rate allocations, and priority levels.
+
+* **Single Node (hub-worker01):**
+
+  ```bash
+  WORKER1_IP=$(oc get pod -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent --field-selector spec.nodeName=hub-worker01.ocp4-hub.test.com -o jsonpath='{.items[0].status.podIP}')
+
+  oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+    curl -s "http://${WORKER1_IP}:8080/config?interface=enp1s0" | jq '{node: .node, htbPresent: .actual.htbQdiscPresent, egressClasses: .actual.classes}'
+  ```
+
+* **All Worker Nodes:**
+
+  ```bash
+  for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+    node_name=$(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath="{.items[?(@.status.podIP=='${pod_ip}')].spec.nodeName}")
+    if [[ "${node_name}" == *"master"* ]]; then continue; fi
+  
+    oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+      curl -s "http://${pod_ip}:8080/config?interface=enp1s0" | jq '{node: .node, htbPresent: .actual.htbQdiscPresent, egressClasses: .actual.classes}'
+  done
+  ```
+
+### A.5. Force Local Rule Reconciliation
+Trigger an immediate, on-demand sync of Linux TC rules via the Node Agent /reconcile API without waiting for the periodic reconcile loop.
+
+* **Single Worker Node (hub-worker01):**
+
+  ```bash
+  WORKER1_IP=$(oc get pod -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent --field-selector spec.nodeName=hub-worker01.ocp4-hub.test.com -o jsonpath='{.items[0].status.podIP}')
+
+  oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+    curl -s -X POST "http://${WORKER1_IP}:8080/reconcile" | jq .
+  ```
+
+* **All Worker Nodes:**
+
+  ```bash
+  for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+    node_name=$(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath="{.items[?(@.status.podIP=='${pod_ip}')].spec.nodeName}")
+    if [[ "${node_name}" == *"master"* ]]; then continue; fi
+  
+    echo "=== Triggering Reconcile on: ${node_name} (${pod_ip}) ==="
+    oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+      curl -s -X POST "http://${pod_ip}:8080/reconcile" | jq .
+  done
+  ```
+  
+
+### A.6. View Operator Logs
+Stream logs from the central Manager controller or the host DaemonSet Agents.
+
+* **Controller Manager Logs:**
+
+  ```bash
+  oc logs -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -c manager --tail=100 -f
+  ```
+
+* **Single Node Agent (hub-worker01):**
+
+  ```bash
+  WORKER1_POD=$(oc get pod -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent --field-selector spec.nodeName=hub-worker01.ocp4-hub.test.com -o jsonpath='{.items[0].metadata.name}')
+
+  oc logs -n openshift-vlan-tc-operator ${WORKER1_POD} -c agent --tail=100 -f
+  ```
+  
+* **All Worker Node Agents:**
+
+  ```bash
+  for pod in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].metadata.name}'); do
+    node=$(oc get pod -n openshift-vlan-tc-operator${pod} -o jsonpath='{.spec.nodeName}')
+    if [[ "${node}" == *"master"* ]]; then continue; fi
+  
+    echo "=================================================="
+    echo "=== Agent Logs: ${node} (${pod}) ==="
+    echo "=================================================="
+    oc logs -n openshift-vlan-tc-operator ${pod} -c agent --tail=20
+  done
+  ```
+
+### A.7. Traffic Control Live Metrics & Counters
+Fetch real-time netlink telemetry for egress classes (bytes, packets, overlimits/throttling, borrowed tokens) and ingress filters (bytes, packets, drops).
+
+* **Detailed Metrics for Single Node (hub-worker01):**
+
+  ```bash
+  WORKER1_IP=$(oc get pod -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent --field-selector spec.nodeName=hub-worker01.ocp4-hub.test.com -o jsonpath='{.items[0].status.podIP}')
+
+  oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+    curl -s "http://${pod_ip}:8080/stats?interface=enp1s0" | jq '{
+      node: .node,
+      egressClasses: [.classStats[] | {
+        classId: .classId,
+        name: .name,
+        bytes: .bytes,
+        packets: .packets,
+        borrowed: .borrowed,
+        overlimits: .overlimits,
+        drops: .drops
+      }],
+      ingressFilters: [.ingressStats[] | {
+        classId: .classId,
+        filterId: .filterId,
+        bytes: .bytes,
+        packets: .packets,
+        drops: .drops
+      }]
+    }'
+  ```
+  
+* **Summary Metrics Across All Worker Nodes:**
+
+  ```bash
+  for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
+    node_name=$(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath="{.items[?(@.status.podIP=='${pod_ip}')].spec.nodeName}")
+    if [[ "${node_name}" == *"master"* ]]; then continue; fi
+
+    echo "=================================================="
+    echo "=== Live Counters: ${node_name} ==="
+    echo "=================================================="
+
+    oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+      curl -s "http://${pod_ip}:8080/stats?interface=enp1s0" | jq '{
+        node: .node,
+        egressClasses: [.classStats[] | {
+          classId: .classId,
+          name: .name,
+          bytes: .bytes,
+          packets: .packets,
+          borrowed: .borrowed,
+          overlimits: .overlimits,
+          drops: .drops
+        }],
+        ingressFilters: [.ingressStats[] | {
+          classId: .classId,
+          filterId: .filterId,
+          bytes: .bytes,
+          packets: .packets,
+          drops: .drops
+        }]
+      }'
+  done
+  ```
+
+

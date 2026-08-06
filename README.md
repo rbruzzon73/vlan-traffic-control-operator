@@ -1960,7 +1960,7 @@ vlantrafficcontrol.networking.med.io "test-custom-label" deleted
 
 ---
 
-### TC targeting sequence [ FIX IN PROGRESS ❌ ]
+### TC targeting sequence [ PASSED ✅ ]
 ```bash
 [rbruzzon@rbruzzon-platinum Simple_Tests]$ ./test-tc-targeting-sequence.sh 
 ========================================================================

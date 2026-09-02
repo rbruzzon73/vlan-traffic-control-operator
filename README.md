@@ -2298,6 +2298,287 @@ TIMESTAMP  | INTERFACE    | CLASS    | TOTAL PKTS | BORROWED PKTS | BORROW %   |
 
 ---
 
+### CR field validation 
+
+- Environment: 
+   - host-node-bridge_nncp-worker01.yaml
+   - host-node-bridge_nncp-worker02.yaml
+   - host-node-bridge_nncp-worker03.yaml
+   - host-node-bridge_nads.yaml
+   - host-node-bridge_borrow_vlan-tc-rules.yaml
+   - host-node-bridge_vms.yaml (access via ssh key)
+
+- Basic Script:
+   - verify-tc-cr-fields.sh
+
+- Note:
+   - The verify-tc-cr-fields.sh script is an end-to-end integration testing and validation harness designed for the VLAN Traffic Control Operator. 
+   - Its core purpose is to verify that Custom Resources (VlanTrafficControl CRs) applied to a Kubernetes/OpenShift cluster are correctly translated, reconciled, and enforced by the operator agent at both the Linux kernel network stack level and the Node Agent REST API level.
+   - Run ./verify-tc-cr-fields.sh --help to inspect all configurable arguments, environmental overrides, scope details, and syntax examples.
+   
+```bash
+# ==============================================================================
+# FULL EXPLICIT INVOCATION WITH ALL CONFIGURABLE ARGUMENTS
+# ==============================================================================
+
+# 1. Target Node & Cluster Scope
+TARGET_WORKER="hub-worker01.ocp4-hub.test.com" \
+NAMESPACE="openshift-vlan-tc-operator" \
+CR_NAME="verify-all-fields-custom-tc" \
+MANAGER_DEPLOY="deploy/vlan-traffic-control-manager" \
+AGENT_LABEL="app=vlan-traffic-control-agent" \
+
+# 2. Root HTB Hierarchy Configuration (htbRoot)
+TEST_IFACE="enp1s0" \
+TEST_ROOT_RATE="10Gbit" \
+TEST_ROOT_HTB_ID=6 \
+TEST_DEFAULT_CLASS_ID="6:99" \
+TEST_RECONCILE_INTERVAL=15 \
+TEST_STRATEGY="flower" \
+
+# 3. Class 1: 802.1Q VLAN Match (matchType: vlan)
+VLAN_CLASS_NAME="vlan150-prod-class" \
+VLAN_CLASS_ID="6:100" \
+VLAN_ID=150 \
+VLAN_PRIO=1 \
+VLAN_EGRESS_RATE="100Mbit" \
+VLAN_EGRESS_CEIL="200Mbit" \
+VLAN_EGRESS_BURST="20k" \
+VLAN_INGRESS_RATE="50Mbit" \
+VLAN_INGRESS_BURST="100k" \
+VLAN_INGRESS_ACTION="drop" \
+VLAN_ENABLE_FQCODEL="true" \
+
+# 4. Class 2: IP Subnet Match (matchType: subnet)
+SUBNET_CLASS_NAME="app-subnet-class" \
+SUBNET_CLASS_ID="6:200" \
+SUBNET_CIDR="172.16.50.0/24" \
+SUBNET_PRIO=2 \
+SUBNET_EGRESS_RATE="300Mbit" \
+./verify-tc-cr-fields.shse" \-class" \Type: auto)
+========================================================================
+🧪 Starting Dynamic Field Verification for VlanTrafficControl CRD
+   • Target Interface : enp1s0 (Rate: 10Gbit, Root Handle: 1:)
+   • VLAN Configured  : ID 100 (50Mbit / 25Mbit)
+   • Subnet Configured: 10.200.0.0/24 (200Mbit / 100Mbit)
+   • Mark Configured  : 8 [0x8] (300Mbit / 50Mbit)
+   • Auto Configured  : VLAN 400 (500Mbit / 150Mbit)
+========================================================================
+
+🔍 Resolving target worker node...
+   • Target Worker Node : hub-worker01.ocp4-hub.test.com (Auto-discovered)
+
+📝 Applying VlanTrafficControl CR targeting node 'hub-worker01.ocp4-hub.test.com'...
+vlantrafficcontrol.networking.med.io/verify-all-fields-tc created
+
+⏳ Waiting for Agent Pod to be created and reach Ready status on 'hub-worker01.ocp4-hub.test.com'...
+   • Agent Pod spawned : vlan-traffic-control-agent-fnbxj (Running)
+   • Agent Pod IP       : 192.168.100.21
+
+⚡ Triggering instant agent reconciliation pass...
+⏳ Waiting for local TC rules to settle (5 seconds)...
+
+🕵️  Auditing Node Alignment API endpoint (http://192.168.100.21:8080/config)...
+✅ PASSED: Node Agent API confirms 100% configuration alignment (isAligned: true, driftDeltas: []).
+
+🐧 Verifying Linux Kernel HTB Class Hierarchy on host (enp1s0)...
+✅ PASSED: Kernel HTB Class 1:100 verified (VLAN -> Rate: 50Mbit, Ceil: 100Mbit, Priority: 1).
+✅ PASSED: Kernel HTB Class 1:200 verified (Subnet -> Rate: 200Mbit, Ceil: 400Mbit, Priority: 2).
+✅ PASSED: Kernel HTB Class 1:300 verified (Mark -> Rate: 300Mbit, Ceil: 300Mbit, Priority: 3).
+✅ PASSED: Kernel HTB Class 1:400 verified (Auto -> Rate: 500Mbit, Ceil: 1Gbit, Priority: 4).
+
+🌾 Verifying Active Leaf Qdiscs (fq_codel)...
+✅ PASSED: fq_codel leaf qdisc correctly attached beneath Class 1:100 (enableFqCodel: true).
+✅ PASSED: fq_codel leaf qdisc correctly omitted beneath Class 1:400 (enableFqCodel: false).
+
+🛡️  Verifying Ingress Policing Filters (parent ffff:)...
+✅ PASSED: Ingress VLAN Flower Filter verified (VLAN ID: 100 -> Police: 25Mbit, Action: drop).
+✅ PASSED: Ingress Subnet Flower Filter verified (10.200.0.0/24 -> Police: 100Mbit, Action: drop).
+✅ PASSED: Ingress SKB Mark Filter verified via Netlink API & Kernel (Mark: 8 [0x8] -> Police: 50Mbit, Action: drop).
+
+========================================================================
+📸 SETUP EVIDENCE SUMMARY: SUCCESSFUL SETUP EVIDENCE
+========================================================================
+
+1. Active Kernel HTB Classes on 'enp1s0':
+class htb 1:99 parent 1:1 prio 0 rate 1Mbit ceil 10Gbit burst 1600b cburst 1200b
+class htb 1:1 root rate 10Gbit ceil 10Gbit burst 1200b cburst 1200b
+class htb 1:100 parent 1:1 leaf 100: prio 1 rate 50Mbit ceil 100Mbit burst 15Kb cburst 1600b
+class htb 1:200 parent 1:1 leaf 200: prio 2 rate 200Mbit ceil 400Mbit burst 30699b cburst 1600b
+class htb 1:300 parent 1:1 leaf 300: prio 3 rate 300Mbit ceil 300Mbit burst 20Kb cburst 1574b
+class htb 1:400 parent 1:1 prio 4 rate 500Mbit ceil 1Gbit burst 25560b cburst 1496b
+
+2. Active Kernel Leaf Qdiscs on 'enp1s0':
+qdisc htb 1: root refcnt 2 r2q 10 default 0x99 direct_packets_stat 1 direct_qlen 1000
+qdisc fq_codel 100: parent 1:100 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 
+qdisc fq_codel 200: parent 1:200 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 
+qdisc fq_codel 300: parent 1:300 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 
+qdisc ingress ffff: parent ffff:fff1 ---------------- 
+
+3. Active Kernel Ingress Policing Filters on 'enp1s0':
+filter protocol 802.1Q pref 1 flower chain 0 
+filter protocol 802.1Q pref 1 flower chain 0 handle 0x1 
+  vlan_id 100
+  not_in_hw
+	action order 1:  police 0x3 rate 25Mbit burst 50Kb mtu 2Kb action drop overhead 0b 
+	ref 1 bind 1 
+
+filter protocol ip pref 2 flower chain 0 
+filter protocol ip pref 2 flower chain 0 handle 0x1 
+  eth_type ipv4
+  dst_ip 10.200.0.0/24
+  not_in_hw
+	action order 1:  police 0x5 rate 100Mbit burst 60Kb mtu 2Kb action drop overhead 0b 
+	ref 1 bind 1 
+
+filter protocol all pref 3 fw chain 0 
+filter protocol all pref 3 fw chain 0 handle 0x8 
+
+	action order 1:  police 0x1 rate 50Mbit burst 20Kb mtu 2Kb action drop overhead 0b 
+	ref 1 bind 1 
+
+filter protocol 802.1Q pref 4 flower chain 0 
+filter protocol 802.1Q pref 4 flower chain 0 handle 0x1 
+  vlan_id 400
+  not_in_hw
+	action order 1:  police 0x2 rate 150Mbit burst 40Kb mtu 2Kb action drop overhead 0b 
+	ref 1 bind 1 
+
+
+4. Node Agent REST API Config Report (/config):
+{
+  "node": "hub-worker01.ocp4-hub.test.com",
+  "interface": "enp1s0",
+  "isAligned": true,
+  "actualClasses": [
+    {
+      "name": "",
+      "classId": "1:99",
+      "matchType": "",
+      "egressRate": "1Mbit",
+      "egressCeil": "10Gbit"
+    },
+    {
+      "name": "",
+      "classId": "1:1",
+      "matchType": "",
+      "egressRate": "10Gbit",
+      "egressCeil": "10Gbit"
+    },
+    {
+      "name": "test-vlan-class",
+      "classId": "1:100",
+      "matchType": "vlan",
+      "vlanId": 100,
+      "egressRate": "50Mbit",
+      "egressCeil": "100Mbit",
+      "priority": 1
+    },
+    {
+      "name": "test-subnet-class",
+      "classId": "1:200",
+      "matchType": "subnet",
+      "subnet": "10.200.0.0/24",
+      "egressRate": "200Mbit",
+      "egressCeil": "400Mbit",
+      "priority": 2
+    },
+    {
+      "name": "test-mark-class",
+      "classId": "1:300",
+      "matchType": "mark",
+      "mark": 8,
+      "egressRate": "300Mbit",
+      "egressCeil": "300Mbit",
+      "priority": 3
+    },
+    {
+      "name": "test-auto-class",
+      "classId": "1:400",
+      "matchType": "auto",
+      "vlanId": 400,
+      "egressRate": "500Mbit",
+      "egressCeil": "1Gbit",
+      "priority": 4
+    }
+  ],
+  "actualIngressFilters": [
+    {
+      "priority": 1,
+      "handle": 1,
+      "type": "flower",
+      "protocol": 33024,
+      "name": "test-vlan-class",
+      "matchType": "vlan",
+      "vlanId": 100,
+      "ingressRate": "25Mbit",
+      "ingressBurst": "50k",
+      "action": "police drop",
+      "matches": {
+        "eth_type": "0x8100",
+        "vlan_id": "100"
+      }
+    },
+    {
+      "priority": 2,
+      "handle": 1,
+      "type": "flower",
+      "protocol": 2048,
+      "name": "test-subnet-class",
+      "matchType": "subnet",
+      "subnet": "10.200.0.0/24",
+      "ingressRate": "100Mbit",
+      "ingressBurst": "60k",
+      "action": "police drop"
+    },
+    {
+      "priority": 3,
+      "handle": 8,
+      "type": "fw",
+      "protocol": 3,
+      "name": "test-mark-class",
+      "matchType": "mark",
+      "mark": 8,
+      "ingressRate": "50Mbit",
+      "ingressBurst": "20k",
+      "action": "police drop",
+      "matches": {
+        "mark": "8"
+      }
+    },
+    {
+      "priority": 4,
+      "handle": 1,
+      "type": "flower",
+      "protocol": 33024,
+      "name": "test-auto-class",
+      "matchType": "auto",
+      "vlanId": 400,
+      "ingressRate": "150Mbit",
+      "ingressBurst": "40k",
+      "action": "police drop",
+      "matches": {
+        "eth_type": "0x8100",
+        "vlan_id": "400"
+      }
+    }
+  ],
+  "driftDeltas": []
+}
+========================================================================
+
+========================================================================
+🎉 ALL FIELD VERIFICATION TESTS PASSED SUCCESSFULLY!
+All CR fields were successfully validated, reconciled, and applied
+to host 'hub-worker01.ocp4-hub.test.com' kernel.
+========================================================================
+
+🧹 Cleaning up verification CR 'verify-all-fields-tc'...
+vlantrafficcontrol.networking.med.io "verify-all-fields-tc" deleted
+```
+  
+---
+
 ## Appendix: Useful Operational & Troubleshooting Commands
 
 This appendix provides handy shell one-liners and loops for inspecting node alignment, extracting active TC configurations, triggering manual reconciliations, viewing operator logs, and auditing live traffic metrics.

@@ -2847,11 +2847,9 @@ Fetch real-time netlink telemetry for egress classes (bytes, packets, overlimits
 
 - Deploy the VLAN Traffic Control Operator from the OpenShift VLAN Traffic Control catalog source within Red Hat OpenShift 4.  
 
-     - Note:
-	    
-		- The last version of VLAN Traffic Control Operator rleased in 0.3.3.
-		
-		- VLAN Traffic Control Operator v 0.3.3 was released on September 2, 2026.
+     - Points Of Attention:	    
+		- The latest version of the VLAN Traffic Control Operator is 0.3.3, which was released on September 2, 2026.
+        - Please note that the images included in the following section are for illustrative purposes only and may not represent the most recent version released.
 
 ```yaml
 apiVersion: operators.coreos.com/v1alpha1

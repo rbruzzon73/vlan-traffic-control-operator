@@ -145,40 +145,60 @@ func ReconcileIngressRules(link netlink.Link, spec *networkingv1alpha1.HtbRootSp
 		}
 
 		burstBytes := uint64(50000)
-		if cls.EgressBurst != "" {
+		if cls.IngressBurst != "" {
+			if b, err := ParseBurstToBytes(cls.IngressBurst); err == nil && b > 0 {
+				burstBytes = b
+			}
+		} else if cls.EgressBurst != "" {
 			if b, err := ParseBurstToBytes(cls.EgressBurst); err == nil && b > 0 {
 				burstBytes = b
 			}
 		}
 
-		// Build tc filter command
-		args := []string{"filter", "add", "dev", iface, "ingress"}
-
-		proto := "ip"
-		if cls.VlanID > 0 {
-			proto = "802.1q"
-		}
-		args = append(args, "protocol", proto, "prio", strconv.Itoa(int(prio)), "flower")
-
-		if cls.VlanID > 0 {
-			args = append(args, "vlan_id", strconv.Itoa(cls.VlanID))
+		// Use ResolveClassifier to determine protocol, match args, and filter type
+		protocol, matchArgs, _, _, err := ResolveClassifier(cls, spec.HtbID)
+		if err != nil {
+			log.Error(err, "[TC] Failed resolving classifier for ingress rule", "classId", cls.GetClassID(spec.HtbID))
+			continue
 		}
 
-		if cls.Subnet != "" {
-			_, cidr, err := net.ParseCIDR(cls.Subnet)
-			if err == nil && cidr != nil {
-				args = append(args, "dst_ip", cls.Subnet)
+		// Base args: tc filter add dev <iface> parent ffff:
+		args := []string{"filter", "add", "dev", iface, "parent", "ffff:", "protocol", protocol, "prio", strconv.Itoa(int(prio))}
+
+		// Handle 'fw' (Firewall Mark) vs 'flower' (VLAN/Subnet) classifier differences
+		if len(matchArgs) >= 3 && matchArgs[0] == "handle" && matchArgs[2] == "fw" {
+			// Constructs: tc filter add dev <iface> parent ffff: protocol all prio <prio> handle <mark> fw action police ...
+			args = append(args, "handle", matchArgs[1], "fw")
+		} else {
+			// Constructs: tc filter add dev <iface> parent ffff: protocol <proto> prio <prio> flower ...
+			args = append(args, "flower")
+
+			if cls.VlanID > 0 {
+				args = append(args, "vlan_id", strconv.Itoa(cls.VlanID))
+			}
+
+			if cls.Subnet != "" {
+				_, cidr, err := net.ParseCIDR(cls.Subnet)
+				if err == nil && cidr != nil {
+					args = append(args, "dst_ip", cls.Subnet)
+				}
 			}
 		}
 
-		// Add police action parameters
+		// Determine ingress action ("drop" or "pass")
+		action := strings.ToLower(string(cls.IngressAction))
+		if action == "" {
+			action = "drop"
+		}
+
+		// Append police action parameters
 		rateStr := fmt.Sprintf("%dbps", rateBytes)
 		burstStr := fmt.Sprintf("%db", burstBytes)
-		args = append(args, "action", "police", "rate", rateStr, "burst", burstStr, "drop")
+		args = append(args, "action", "police", "rate", rateStr, "burst", burstStr, action)
 
 		out, err := exec.Command("tc", args...).CombinedOutput()
 		if err != nil {
-			log.Error(err, "[TC] Failed adding ingress policing filter via tc CLI", "interface", iface, "prio", prio, "output", string(out))
+			log.Error(err, "[TC] Failed adding ingress policing filter via tc CLI", "interface", iface, "prio", prio, "args", strings.Join(args, " "), "output", string(out))
 			return fmt.Errorf("tc filter add failed: %w (output: %s)", err, string(out))
 		}
 

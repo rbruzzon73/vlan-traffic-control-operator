@@ -21,7 +21,7 @@ spec:
       serviceAccountName: vlan-traffic-control-manager
       containers:
         - name: manager
-          image: ghcr.io/rbruzzon73/vlan-traffic-control-operator:v0.2.94
+          image: ghcr.io/rbruzzon73/vlan-traffic-control-operator:v0.3.3
           imagePullPolicy: Always
           command:
             - /manager

@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -79,9 +80,10 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if controllerutil.ContainsFinalizer(&instance, vlanTrafficControlFinalizer) {
 			logger.Info("Performing finalizer cleanup for VlanTrafficControl", "name", instance.Name)
 
-			// Update condition to signal deletion progress
-			r.updateStatusCondition(&instance, TypeReady, metav1.ConditionFalse, ReasonDeleting, "Cleaning up TC rules on target node agents")
-			_ = r.Status().Update(ctx, &instance)
+			// Update condition to signal deletion progress with retry handling
+			r.updateStatusWithRetry(ctx, req.NamespacedName, func(cr *v1alpha1.VlanTrafficControl) {
+				r.updateStatusCondition(cr, TypeReady, metav1.ConditionFalse, ReasonDeleting, "Cleaning up TC rules on target node agents")
+			})
 
 			// Execute node-role aware TC rule cleanup across node agent pods
 			if err := r.cleanupNodeTrafficControl(ctx, &instance, targetNamespace); err != nil {
@@ -136,17 +138,16 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// 4. Always allow Agent DaemonSet to span ALL nodes (masters + workers)
-	// Local agents use executor.IsPolicyTargetingNode to evaluate CR targeting dynamically.
 	var aggregatedNodeSelector map[string]string = nil
 	var aggregatedTolerations []corev1.Toleration
 
 	var allCRs v1alpha1.VlanTrafficControlList
 	if err := r.List(ctx, &allCRs); err == nil {
 		for _, cr := range allCRs.Items {
-                    for _, tol := range cr.Spec.Tolerations {
-                        aggregatedTolerations = append(aggregatedTolerations, tol.ToCoreV1())
-                    }
-                }
+			for _, tol := range cr.Spec.Tolerations {
+				aggregatedTolerations = append(aggregatedTolerations, tol.ToCoreV1())
+			}
+		}
 	}
 
 	// 5. Build or Update the Agent DaemonSet Manifest
@@ -168,8 +169,9 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if errors.IsNotFound(err) {
 			logger.Info("Creating Agent DaemonSet across cluster nodes", "namespace", targetNamespace)
 			if err := r.Create(ctx, agentDaemonSet); err != nil {
-				r.updateStatusCondition(&instance, TypeReady, metav1.ConditionFalse, ReasonFailed, fmt.Sprintf("Failed to create DaemonSet: %v", err))
-				_ = r.Status().Update(ctx, &instance)
+				r.updateStatusWithRetry(ctx, req.NamespacedName, func(cr *v1alpha1.VlanTrafficControl) {
+					r.updateStatusCondition(cr, TypeReady, metav1.ConditionFalse, ReasonFailed, fmt.Sprintf("Failed to create DaemonSet: %v", err))
+				})
 				return ctrl.Result{}, fmt.Errorf("failed to create Agent DaemonSet: %w", err)
 			}
 		} else {
@@ -206,8 +208,9 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 			}
 
 			if err := r.Update(ctx, &existingDS); err != nil {
-				r.updateStatusCondition(&instance, TypeReady, metav1.ConditionFalse, ReasonFailed, fmt.Sprintf("Failed to update DaemonSet: %v", err))
-				_ = r.Status().Update(ctx, &instance)
+				r.updateStatusWithRetry(ctx, req.NamespacedName, func(cr *v1alpha1.VlanTrafficControl) {
+					r.updateStatusCondition(cr, TypeReady, metav1.ConditionFalse, ReasonFailed, fmt.Sprintf("Failed to update DaemonSet: %v", err))
+				})
 				return ctrl.Result{}, fmt.Errorf("failed to update Agent DaemonSet: %w", err)
 			}
 		}
@@ -219,14 +222,15 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// 7. Aggregate Performance Metrics from Agent Pods
 	r.collectAgentPerformanceStats(ctx, &instance, targetNamespace)
 
-	// 8. Update Status Conditions to Ready
-	instance.Status.ObservedGeneration = instance.Generation
-	r.updateStatusCondition(&instance, TypeConfigured, metav1.ConditionTrue, ReasonSuccessful, "Agent DaemonSet active")
-	r.updateStatusCondition(&instance, TypeReady, metav1.ConditionTrue, ReasonSuccessful, "Traffic control operator synchronized")
-
-	if err := r.Status().Update(ctx, &instance); err != nil {
-		logger.Error(err, "Failed to update status for VlanTrafficControl")
-		return ctrl.Result{}, err
+	// 8. Update Status Conditions to Ready with RetryOnConflict
+	errStatus := r.updateStatusWithRetry(ctx, req.NamespacedName, func(cr *v1alpha1.VlanTrafficControl) {
+		cr.Status.ObservedGeneration = cr.Generation
+		r.updateStatusCondition(cr, TypeConfigured, metav1.ConditionTrue, ReasonSuccessful, "Agent DaemonSet active")
+		r.updateStatusCondition(cr, TypeReady, metav1.ConditionTrue, ReasonSuccessful, "Traffic control operator synchronized")
+	})
+	if errStatus != nil {
+		logger.Error(errStatus, "Failed to update status for VlanTrafficControl after retries")
+		return ctrl.Result{}, errStatus
 	}
 
 	reconcileInterval := time.Duration(instance.Spec.ReconcileIntervalSeconds) * time.Second
@@ -235,6 +239,18 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
+}
+
+// updateStatusWithRetry performs status updates wrapped in RetryOnConflict to eliminate optimistic locking errors
+func (r *VlanTrafficControlReconciler) updateStatusWithRetry(ctx context.Context, namespacedName types.NamespacedName, updateFn func(cr *v1alpha1.VlanTrafficControl)) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latestCR := &v1alpha1.VlanTrafficControl{}
+		if err := r.Get(ctx, namespacedName, latestCR); err != nil {
+			return err
+		}
+		updateFn(latestCR)
+		return r.Status().Update(ctx, latestCR)
+	})
 }
 
 // setOperatorDeploymentOwnerRef binds the Agent DaemonSet lifecycle to the Operator Deployment
@@ -360,7 +376,7 @@ func getAgentImage() string {
 	if img := os.Getenv("RELATED_IMAGE_AGENT"); img != "" {
 		return img
 	}
-	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.94"
+	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.3.3"
 }
 
 func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(
@@ -421,8 +437,8 @@ func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(
 					HostNetwork:        true,
 					HostPID:            true,
 					ServiceAccountName: "vlan-traffic-control-manager",
-					NodeSelector:       nodeSelector,
-					Tolerations:        baseTolerations,
+					NodeSelector:        nodeSelector,
+					Tolerations:         baseTolerations,
 					Containers: []corev1.Container{
 						{
 							Name:            "agent",

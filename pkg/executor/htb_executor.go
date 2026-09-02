@@ -148,23 +148,34 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 		filterParentStr := fmt.Sprintf("%d:0", rootHandle)
 		
 		var filterArgs []string
-		// Handle 'fw' mark classification vs 'flower' classification CLI structure
+		// Handle 'fw' mark classification vs 'flower' classification CLI structure cleanly
 		if proto == "all" && len(flowerMatch) >= 3 && flowerMatch[2] == "fw" {
-			// fw classifier: tc filter replace dev <iface> parent 1:0 protocol all prio <prio> handle <mark> fw flowid 1:400
+			// fw classifier: tc filter replace dev <iface> parent 1:0 protocol all prio <prio> handle <mark> fw flowid 1:300
 			filterArgs = []string{"tc", "filter", "replace", "dev", iface, "parent", filterParentStr,
 				"protocol", proto, "prio", fmt.Sprintf("%d", filterPrio),
 				flowerMatch[0], flowerMatch[1], flowerMatch[2], "flowid", classHandle}
 		} else {
-			// flower classifier: tc filter replace dev <iface> parent 1:0 protocol <proto> prio <prio> flower <matches...> flowid 1:400
+			// flower classifier: tc filter replace dev <iface> parent 1:0 protocol <proto> prio <prio> handle 1 flower <matches...> flowid 1:100
+			// Explicitly passing 'handle 1' ensures atomic replacement without 'RTNETLINK answers: File exists'
 			filterArgs = []string{"tc", "filter", "replace", "dev", iface, "parent", filterParentStr,
-				"protocol", proto, "prio", fmt.Sprintf("%d", filterPrio), "flower"}
+				"protocol", proto, "prio", fmt.Sprintf("%d", filterPrio), "handle", "1", "flower"}
 			filterArgs = append(filterArgs, flowerMatch...)
 			filterArgs = append(filterArgs, "flowid", classHandle)
 		}
 
 		cmdFilter := execHostCommand(filterArgs[0], filterArgs[1:]...)
 		if out, err := cmdFilter.CombinedOutput(); err != nil {
-			log.Info("[HTB] Warning: Failed adding/replacing egress filter", "class", classHandle, "output", string(out), "error", err.Error())
+			log.Info("[HTB] Warning: Filter replace failed, attempting preference flush and re-add", "class", classHandle, "output", string(out))
+
+			// Fallback sequence: flush preference handle and re-add
+			cmdDelFilter := execHostCommand("tc", "filter", "del", "dev", iface, "parent", filterParentStr, "prio", fmt.Sprintf("%d", filterPrio))
+			_ = cmdDelFilter.Run()
+
+			filterAddArgs := append([]string{"tc", "filter", "add"}, filterArgs[3:]...)
+			cmdAddFilter := execHostCommand(filterAddArgs[0], filterAddArgs[1:]...)
+			if outAdd, errAdd := cmdAddFilter.CombinedOutput(); errAdd != nil {
+				log.Error(errAdd, "[HTB] Error: Failed adding egress filter after flush", "class", classHandle, "output", string(outAdd))
+			}
 		}
 	}
 

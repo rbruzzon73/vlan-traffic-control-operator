@@ -4,12 +4,12 @@ metadata:
   annotations:
     alm-examples: '[]'
     capabilities: Basic Install
-    createdAt: '2026-08-05T08:57:11Z'
+    createdAt: '2026-09-02T16:16:20Z'
     description: "The VLAN Traffic Control Operator manages eBPF/TC flower ingress policing \nand HTB egress bandwidth shaping per VLAN directly on OpenShift worker nodes.\n"
     operatorframework.io/suggested-namespace: openshift-vlan-tc-operator
     operators.operatorframework.io/builder: operator-sdk-v1.42.3
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
-  name: vlan-traffic-control.v0.2.94
+  name: vlan-traffic-control.v0.3.3
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -120,8 +120,8 @@ spec:
                     fieldRef:
                       fieldPath: metadata.name
                 - name: RELATED_IMAGE_AGENT
-                  value: ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.94
-                image: ghcr.io/rbruzzon73/vlan-traffic-control-operator:v0.2.94
+                  value: ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.3.3
+                image: ghcr.io/rbruzzon73/vlan-traffic-control-operator:v0.3.3
                 imagePullPolicy: Always
                 name: manager
                 resources:
@@ -167,8 +167,8 @@ spec:
     name: rbruzzon73
     url: https://github.com/rbruzzon73
   relatedImages:
-  - image: ghcr.io/rbruzzon73/vlan-traffic-control-operator:v0.2.94
+  - image: ghcr.io/rbruzzon73/vlan-traffic-control-operator:v0.3.3
     name: operator
-  - image: ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.2.94
+  - image: ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.3.3
     name: agent
-  version: 0.2.94
+  version: 0.3.3

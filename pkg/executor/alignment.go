@@ -49,6 +49,13 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 	report.Actual.Classes = make([]networkingv1alpha1.ClassSpec, 0)
 	report.Actual.IngressFilters = make([]networkingv1alpha1.FilterMeta, 0)
 
+	// Resolve dynamic root handle ID (e.g. htbId: 6 -> handle 6:0)
+	rootHandle := desired.HtbID
+	if rootHandle <= 0 {
+		rootHandle = 1
+	}
+	expectedRootHandle := netlink.MakeHandle(uint16(rootHandle), 0)
+
 	// Resolve target network link via Netlink
 	link, err := netlink.LinkByName(desired.Interface)
 	if err != nil {
@@ -72,22 +79,17 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 		return report, nil
 	}
 
-	// 1. Inspect Attached Qdiscs (Root HTB & Ingress)
+	// 1. Inspect Attached Qdiscs (Root HTB & Ingress) using dynamic rootHandle
 	qdiscs, err := netlink.QdiscList(link)
 	if err == nil {
 		for _, q := range qdiscs {
-			if q.Type() == "htb" && q.Attrs().Handle == netlink.MakeHandle(1, 0) {
+			if q.Type() == "htb" && q.Attrs().Handle == expectedRootHandle {
 				report.Actual.HtbQdiscPresent = true
 			}
 			if q.Type() == "ingress" {
 				report.Actual.IngressPresent = true
 			}
 		}
-	}
-
-	rootHandle := desired.HtbID
-	if rootHandle <= 0 {
-		rootHandle = 1
 	}
 
 	// Helper map to quickly locate desired specs by Class ID
@@ -108,9 +110,9 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 		}
 	}
 
-	// 2. Inspect Actual Live Netlink Egress Classes (Clean: Egress fields ONLY)
+	// 2. Inspect Actual Live Netlink Egress Classes using dynamic rootHandle
 	liveClasses := make(map[string]*netlink.HtbClass)
-	classes, err := netlink.ClassList(link, netlink.MakeHandle(1, 0))
+	classes, err := netlink.ClassList(link, expectedRootHandle)
 	if err == nil {
 		for _, c := range classes {
 			if htb, ok := c.(*netlink.HtbClass); ok {
@@ -178,7 +180,7 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 		}
 	}
 
-	// 4. Inspect & Validate Ingress Policing Filters Across ALL Filter Types
+	// 4. Inspect & Validate Ingress Policing Filters Across ALL Filter Types (Flower & FW)
 	filters, err := netlink.FilterList(link, netlink.HANDLE_INGRESS)
 	liveFilters := make(map[uint16]bool)
 	if err == nil {
@@ -205,11 +207,20 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 				Matches:  make(map[string]string),
 			}
 
+			// Map Flower Classifier
 			if flower, ok := f.(*netlink.Flower); ok {
 				if flower.VlanId != 0 {
 					meta.Matches["vlan_id"] = fmt.Sprintf("%d", flower.VlanId)
 					meta.Matches["eth_type"] = fmt.Sprintf("0x%x", flower.EthType)
 				}
+			}
+
+			// Map FW Classifier (handle = mark)
+			if f.Type() == "fw" {
+				meta.Type = "fw"
+				meta.MatchType = "mark"
+				meta.Mark = uint32(attrs.Handle)
+				meta.Matches["mark"] = fmt.Sprintf("%d", attrs.Handle)
 			}
 
 			// Enrich with matching 1:1 class metadata & action

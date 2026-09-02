@@ -291,6 +291,16 @@ func main() {
 
 			if item.Spec.HtbRoot.Interface == iface {
 				hasMatchingPolicy = true
+				if item.Spec.HtbRoot.HtbID > 0 {
+					aggregatedSpec.HtbID = item.Spec.HtbRoot.HtbID
+				}
+				if item.Spec.HtbRoot.DefaultClassID != "" {
+					aggregatedSpec.DefaultClassID = item.Spec.HtbRoot.DefaultClassID
+				}
+				if item.Spec.HtbRoot.Rate != "" {
+					aggregatedSpec.Rate = item.Spec.HtbRoot.Rate
+				}
+
 				aggregatedSpec.Classes = append(aggregatedSpec.Classes, item.Spec.HtbRoot.Classes...)
 			}
 		}
@@ -427,6 +437,10 @@ func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger)
 			}
 			specsByInterface[iface] = aggSpec
 			strategyByInterface[iface] = item.Spec.TcStrategy
+		} else {
+			if item.Spec.HtbRoot.HtbID > 0 {
+				aggSpec.HtbID = item.Spec.HtbRoot.HtbID
+			}
 		}
 
 		aggSpec.Classes = append(aggSpec.Classes, item.Spec.HtbRoot.Classes...)

@@ -237,6 +237,14 @@ The operator provides granular control over which nodes in the cluster receive t
 | `htbId` | `integer` | No | `1` | Custom HTB root handle ID. |
 | `classes` | `[]VlanClassSpec` | **Yes** | — | List of individual traffic control class definitions configured under this root. |
 
+Notes on Interface Target Selection:
+
+- Parent Interface (enp1s0): Use when applying global multi-VLAN QoS policies. This allows HTB to arbitrate bandwidth across all VLANs (100, 280, 380) on the physical link.
+
+- Bridge Interface (br-vlan100 / br-vlan380): Use when applying dedicated per-VLAN rate limiting directly on the host's Layer 3 gateway bridge.
+
+- Note: Avoid querying enp1s0.100 directly, as slave VLAN sub-interfaces do not hold the root HTB qdisc in this bridge topology.
+
 ### `VlanClassSpec` (`spec.htbRoot.classes[]`)
 
 | Field | Type | Required | Default | Description |

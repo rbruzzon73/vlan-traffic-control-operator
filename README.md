@@ -1352,11 +1352,13 @@ curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0" | jq --arg cid "$C
   {
     node: .node,
     interface: .interface,
+    isAligned: .isAligned,
     classId: $cid,
     matched_name: $targetName,
     desired_class: (.desired.classes[] | select(.classId == $cid)),
     actual_egress_class: (.actual.classes[] | select(.classId == $cid)),
-    actual_ingress_filter: (.actual.ingressFilters[] | select(.name == $targetName))
+    actual_ingress_filter: (.actual.ingressFilters[] | select(.name == $targetName)),
+    drift_deltas: [.driftDeltas[]? | select(.classId == $cid or .name == $targetName or .target == $targetName)]
   }'
 
 ---
@@ -1370,61 +1372,46 @@ curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0" | jq --arg cid "$C
   "node": "hub-worker01.ocp4-hub.test.com",
   "interface": "enp1s0",
   "isAligned": true,
-  "desired": {
-    "interface": "enp1s0",
-    "rate": "10Gbit",
-    "classes": [
-      {
-        "name": "storage-vlan-100",
-        "classId": "1:100",
-        "matchType": "vlan",
-        "vlanId": 100,
-        "egressRate": "50Mbit",
-        "egressCeil": "10Gbit",
-        "ingressRate": "30Mbit",
-        "ingressBurst": "15k",
-        "ingressAction": "drop",
-        "priority": 1,
-        "enableFqCodel": true
-      }
-    ]
+  "classId": "1:380",
+  "matched_name": "vlan-380-low-priority-migration",
+  "desired_class": {
+    "name": "vlan-380-low-priority-migration",
+    "classId": "1:380",
+    "matchType": "subnet",
+    "subnet": "10.0.238.0/24",
+    "egressRate": "500Mbit",
+    "egressCeil": "2Gbit",
+    "egressBurst": "20k",
+    "enableFqCodel": true,
+    "ingressRate": "500Mbit",
+    "ingressBurst": "20k",
+    "ingressAction": "drop",
+    "priority": 3
   },
-  "actual": {
-    "htbQdiscPresent": true,
-    "ingressPresent": true,
-    "classes": [
-      {
-        "name": "storage-vlan-100",
-        "classId": "1:100",
-        "matchType": "vlan",
-        "vlanId": 100,
-        "egressRate": "50Mbit",
-        "egressCeil": "10Gbit",
-        "priority": 1
-      }
-    ],
-    "ingressFilters": [
-      {
-        "priority": 1,
-        "handle": 1,
-        "chain": 0,
-        "type": "flower",
-        "protocol": 33024,
-        "name": "storage-vlan-100",
-        "matchType": "vlan",
-        "vlanId": 100,
-        "ingressRate": "30Mbit",
-        "ingressBurst": "15k",
-        "action": "police drop",
-        "matches": {
-          "eth_type": "0x8100",
-          "vlan_id": "100"
-        }
-      }
-    ]
+  "actual_egress_class": {
+    "name": "vlan-380-low-priority-migration",
+    "classId": "1:380",
+    "matchType": "subnet",
+    "subnet": "10.0.238.0/24",
+    "egressRate": "500Mbit",
+    "egressCeil": "2Gbit",
+    "priority": 3
   },
-  "driftDeltas": []
+  "actual_ingress_filter": {
+    "priority": 3,
+    "handle": 1,
+    "type": "flower",
+    "protocol": 2048,
+    "name": "vlan-380-low-priority-migration",
+    "matchType": "subnet",
+    "subnet": "10.0.238.0/24",
+    "ingressRate": "500Mbit",
+    "ingressBurst": "20k",
+    "action": "police drop"
+  },
+  "drift_deltas": []
 }
+
 ```
 #### 2. Misaligned State - Missing Host Interface (`br-vlan100` absent on worker):
 

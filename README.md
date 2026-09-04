@@ -1226,13 +1226,13 @@ oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
 Audit telemetry across all running Agent Pod IPs sequentially from the Manager execution context:
 
 ```bash
-for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
-  echo "=========================================================================="
-  echo ">>> TELEMETRY FOR AGENT AT IP: ${pod_ip}"
-  echo "=========================================================================="
-  oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
-    curl -s "http://${pod_ip}:8080/stats" | jq .
-done
+oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent \
+  -o jsonpath='{range .items[*]}{.spec.nodeName}{"\t"}{.status.podIP}{"\n"}{end}' | \
+  while read -r node ip; do
+    echo "=== Node: ${node} (${ip}) ==="
+    oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
+      curl -s "http://${ip}:8080/stats?interface=enp1s0" | jq .
+  done
 ```
 
 ---

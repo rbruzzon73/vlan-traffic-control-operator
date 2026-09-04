@@ -1345,8 +1345,14 @@ Isolate alignment status for a specific class ID handle (e.g., `1:380` / VLAN 38
 
 
 # Audit alignment for TC Class 1:380
-curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0&classId=1:380" | jq .
-```
+curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0" | jq '
+{
+  node: .node,
+  interface: .interface,
+  isAligned: .isAligned,
+  desired_class: (.desired.classes[] | select(.classId == "1:380")),
+  actual_class: (.actual.classes[] | select(.classId == "1:380"))
+}'
 
 ---
 

@@ -456,27 +456,12 @@ spec:
 
 Check the active class counters on the host node using `oc debug` or direct host access:
 
-- Example of querying via Global Physical Interface:
-
 ```bash
-# Query egress HTB class counters for VLAN 100 (Class 1:100)
-oc debug node/<worker-node> -- bash -c 'chroot /host tc -s class show dev enp1s0 classid 1:100'
+# Query egress HTB class counters for class 1:100
 
-# Query egress HTB class counters for Live Migration (Class 1:380)
-oc debug node/<worker-node> -- bash -c 'chroot /host tc -s class show dev enp1s0 classid 1:380'
+oc debug node/<worker-node> -- bash -c 'chroot /host tc -s class show dev enp1s0.100 classid 1:100'# Query ingress policing counters
 
-# Query ingress policing filter counters on physical egress
-oc debug node/<worker-node> -- bash -c 'chroot /host tc -s filter show dev enp1s0 parent ffff:'
-```
-
-- Example of querying via Dedicated Bridge Interface
-
-```bash
-# Query egress HTB class counters directly on the bridge interface
-oc debug node/<worker-node> -- bash -c 'chroot /host tc -s class show dev br-vlan100 classid 1:100'
-
-# Query ingress policing counters on the bridge interface
-oc debug node/<worker-node> -- bash -c 'chroot /host tc -s filter show dev br-vlan100 parent ffff:'
+oc debug node/<worker-node> -- bash -c 'chroot /host tc -s filter show dev enp1s0.100 parent ffff:' 
 ```
 
 #### Example Command Output

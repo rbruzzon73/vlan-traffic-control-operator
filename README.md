@@ -239,7 +239,9 @@ The operator provides granular control over which nodes in the cluster receive t
 
 Notes on Interface Target Selection:
 
-- Parent Interface (enp1s0): Use when applying global multi-VLAN QoS policies. This allows HTB to arbitrate bandwidth across all VLANs (100, 280, 380) on the physical link.
+- Bond Master Interface (bond0): Use this for bonded physical setups. When physical interfaces (enp1s0, enp2s0) are aggregated into a Linux network bond, attach and query the HTB root qdisc on bond0. This allows HTB to arbitrate bandwidth across all VLANs (100, 280, 380) traversing the bond.
+
+- Parent Physical Interface (enp1s0): Use for non-bonded single-NIC setups to apply global multi-VLAN QoS policies across physical egress.
 
 - Bridge Interface (br-vlan100 / br-vlan380): Use when applying dedicated per-VLAN rate limiting directly on the host's Layer 3 gateway bridge.
 

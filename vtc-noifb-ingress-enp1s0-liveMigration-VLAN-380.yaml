@@ -1,0 +1,41 @@
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: vlan-tc-ingress
+  namespace: openshift-vlan-tc-operator
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  tcStrategy: flower
+  htbRoot:
+    interface: enp1s0
+    classes:
+      - name: vlan-100-ingress-police
+        classId: "1:100"
+        vlanId: 100
+        matchType: subnet
+        subnet: 10.0.100.0/24
+        priority: 1
+        ingressRate: 2Gbit
+        ingressBurst: 50k
+        ingressAction: drop
+
+      - name: vlan-280-ingress-police
+        classId: "1:280"
+        vlanId: 280
+        matchType: subnet
+        subnet: 10.0.218.0/24
+        priority: 2
+        ingressRate: 1Gbit
+        ingressBurst: 30k
+        ingressAction: drop
+
+      # Priority 3: Migration Ingress Policing (Restored to 10Gbit max line-rate capacity)
+      - name: vlan-380-ingress-police
+        classId: "1:380"
+        vlanId: 380
+        matchType: vlan
+        priority: 3
+        ingressRate: 10Gbit
+        ingressBurst: 50k
+        ingressAction: drop

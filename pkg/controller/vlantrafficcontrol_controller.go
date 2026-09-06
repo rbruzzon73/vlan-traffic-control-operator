@@ -48,6 +48,8 @@ type VlanTrafficControlReconciler struct {
 // +kubebuilder:rbac:groups=networking.med.io,resources=vlantrafficcontrols,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.med.io,resources=vlantrafficcontrols/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=networking.med.io,resources=vlantrafficcontrols/finalizers,verbs=update
+// +kubebuilder:rbac:groups=networking.med.io,resources=vlantrafficcontrolsclasses;vlantrafficcontrolclasses,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.med.io,resources=vlantrafficcontrolsclasses/status;vlantrafficcontrolclasses/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=daemonsets;deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods;services;nodes;configmaps;events,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=security.openshift.io,resources=securitycontextconstraints,resourceNames=privileged,verbs=use
@@ -65,7 +67,6 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 
-	// Resolve target namespace for the Agent DaemonSet
 	targetNamespace := instance.Namespace
 	if targetNamespace == "" {
 		targetNamespace = req.Namespace
@@ -80,18 +81,15 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if controllerutil.ContainsFinalizer(&instance, vlanTrafficControlFinalizer) {
 			logger.Info("Performing finalizer cleanup for VlanTrafficControl", "name", instance.Name)
 
-			// Update condition to signal deletion progress with retry handling
 			r.updateStatusWithRetry(ctx, req.NamespacedName, func(cr *v1alpha1.VlanTrafficControl) {
 				r.updateStatusCondition(cr, TypeReady, metav1.ConditionFalse, ReasonDeleting, "Cleaning up TC rules on target node agents")
 			})
 
-			// Execute node-role aware TC rule cleanup across node agent pods
 			if err := r.cleanupNodeTrafficControl(ctx, &instance, targetNamespace); err != nil {
 				logger.Error(err, "Failed to clean up TC rules on node agents during CR deletion")
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, err
 			}
 
-			// Remove finalizer
 			controllerutil.RemoveFinalizer(&instance, vlanTrafficControlFinalizer)
 			if err := r.Update(ctx, &instance); err != nil {
 				logger.Error(err, "Failed to remove finalizer")
@@ -99,7 +97,6 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 			}
 			logger.Info("Successfully finalized VlanTrafficControl and updated node TC rules")
 
-			// Check if any active VlanTrafficControl CRs remain in the cluster
 			var crList v1alpha1.VlanTrafficControlList
 			if err := r.List(ctx, &crList); err == nil && len(crList.Items) <= 1 {
 				logger.Info("No remaining VlanTrafficControl CRs found - removing Agent DaemonSet")
@@ -137,7 +134,7 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 		logger.V(1).Info("Mapped TC Class Handle", "classID", class.ClassID, "classMinor", class.ClassMinor, "fullHandle", classHandle)
 	}
 
-	// 4. Always allow Agent DaemonSet to span ALL nodes (masters + workers)
+	// 4. Build Aggregated Tolerations for Agent DaemonSet
 	var aggregatedNodeSelector map[string]string = nil
 	var aggregatedTolerations []corev1.Toleration
 
@@ -152,8 +149,6 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// 5. Build or Update the Agent DaemonSet Manifest
 	agentDaemonSet := r.buildAgentDaemonSet(&instance, targetNamespace, aggregatedNodeSelector, aggregatedTolerations)
-
-	// Bind Agent DaemonSet lifecycle to Operator Deployment for OLM Garbage Collection
 	_ = r.setOperatorDeploymentOwnerRef(ctx, agentDaemonSet, targetNamespace)
 
 	if instance.Namespace != "" {
@@ -185,12 +180,10 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 		desiredImage := getAgentImage()
 
-		// Compare actual DaemonSet structure to avoid continuous updates
 		nodeSelectorChanged := !reflect.DeepEqual(existingDS.Spec.Template.Spec.NodeSelector, agentDaemonSet.Spec.Template.Spec.NodeSelector)
 		tolerationsChanged := !reflect.DeepEqual(existingDS.Spec.Template.Spec.Tolerations, agentDaemonSet.Spec.Template.Spec.Tolerations)
 		imageChanged := currentImage != desiredImage
 
-		// ONLY trigger an update if structural fields actually changed
 		if nodeSelectorChanged || tolerationsChanged || imageChanged {
 			logger.Info("Updating Agent DaemonSet - structural changes detected",
 				"nodeSelectorChanged", nodeSelectorChanged,
@@ -216,13 +209,19 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
-	// 6. Notify agent pods to re-sync TC state
+	// 6. Project individual HTB class items into VlanTrafficControlClass CRs (Deduplicated)
+	if err := r.reconcileClassProjections(ctx, &instance); err != nil {
+		logger.Error(err, "Failed reconciling VlanTrafficControlClass projections")
+		return ctrl.Result{}, err
+	}
+
+	// 7. Notify agent pods to re-sync TC state
 	r.triggerAgentReconcile(ctx, targetNamespace)
 
-	// 7. Aggregate Performance Metrics from Agent Pods
+	// 8. Aggregate Performance Metrics from Agent Pods
 	r.collectAgentPerformanceStats(ctx, &instance, targetNamespace)
 
-	// 8. Update Status Conditions to Ready with RetryOnConflict
+	// 9. Update Status Conditions to Ready
 	errStatus := r.updateStatusWithRetry(ctx, req.NamespacedName, func(cr *v1alpha1.VlanTrafficControl) {
 		cr.Status.ObservedGeneration = cr.Generation
 		r.updateStatusCondition(cr, TypeConfigured, metav1.ConditionTrue, ReasonSuccessful, "Agent DaemonSet active")
@@ -241,7 +240,81 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
 }
 
-// updateStatusWithRetry performs status updates wrapped in RetryOnConflict to eliminate optimistic locking errors
+// reconcileClassProjections keeps secondary VlanTrafficControlClass projection resources updated, deduplicating classes per CR
+func (r *VlanTrafficControlReconciler) reconcileClassProjections(ctx context.Context, vtc *v1alpha1.VlanTrafficControl) error {
+	seenClassIDs := make(map[string]bool)
+
+	for _, cls := range vtc.Spec.HtbRoot.Classes {
+		classID := cls.GetClassID(vtc.Spec.HtbRoot.HtbID)
+		if seenClassIDs[classID] {
+			continue
+		}
+		seenClassIDs[classID] = true
+
+		projName := fmt.Sprintf("%s-%s", vtc.Name, cls.Name)
+
+		// Determine direction metadata dynamically
+		direction := "ingress+egress"
+		if cls.IngressRate != "" && cls.EgressRate == "" {
+			direction = "ingress"
+		} else if cls.EgressRate != "" && cls.IngressRate == "" {
+			direction = "egress"
+		}
+
+		ingressCeilVal := cls.IngressCeil
+		if ingressCeilVal == "" && cls.IngressRate != "" {
+			ingressCeilVal = vtc.Spec.HtbRoot.Rate
+		}
+
+		proj := &v1alpha1.VlanTrafficControlClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      projName,
+				Namespace: vtc.Namespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": "vlan-traffic-control-operator",
+					"vlantrafficcontrol.parent":    vtc.Name,
+				},
+			},
+		}
+
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, proj, func() error {
+			proj.Spec = v1alpha1.VlanTrafficControlClassSpec{
+				ClassName:     cls.Name,
+				Direction:     direction,
+				ClassID:       classID,
+				MatchType:     cls.MatchType,
+				VlanID:        cls.VlanID,
+				Subnet:        cls.Subnet,
+				Mark:          cls.Mark,
+				IP:            cls.IP,
+				Port:          cls.Port,
+				Dscp:          cls.Dscp,
+				Guaranteed:    cls.EgressRate,
+				CeilBorrow:    cls.EgressCeil,
+				EgressBurst:   cls.EgressBurst,
+				EnableFqCodel: cls.EnableFqCodel,
+				IngressRate:   cls.IngressRate,
+				IngressCeil:   ingressCeilVal,
+				IngressBurst:  cls.IngressBurst,
+				IngressAction: cls.IngressAction,
+				Priority:      cls.Priority,
+				Aligned:       "True",
+			}
+
+			if err := controllerutil.SetControllerReference(vtc, proj, r.Scheme); err != nil {
+				proj.OwnerReferences = []metav1.OwnerReference{
+					*metav1.NewControllerRef(vtc, v1alpha1.GroupVersion.WithKind("VlanTrafficControl")),
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *VlanTrafficControlReconciler) updateStatusWithRetry(ctx context.Context, namespacedName types.NamespacedName, updateFn func(cr *v1alpha1.VlanTrafficControl)) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latestCR := &v1alpha1.VlanTrafficControl{}
@@ -253,8 +326,6 @@ func (r *VlanTrafficControlReconciler) updateStatusWithRetry(ctx context.Context
 	})
 }
 
-// setOperatorDeploymentOwnerRef binds the Agent DaemonSet lifecycle to the Operator Deployment
-// for automatic Kubernetes Garbage Collection upon OLM uninstallation.
 func (r *VlanTrafficControlReconciler) setOperatorDeploymentOwnerRef(ctx context.Context, ds *appsv1.DaemonSet, namespace string) error {
 	var depList appsv1.DeploymentList
 	err := r.List(ctx, &depList, client.InNamespace(namespace), client.MatchingLabels{"control-plane": "controller-manager"})
@@ -280,7 +351,6 @@ func (r *VlanTrafficControlReconciler) setOperatorDeploymentOwnerRef(ctx context
 	return nil
 }
 
-// Helper functions for safe TC handle resolution
 func resolveRootHandle(htbID int) int {
 	if htbID <= 0 {
 		return 1
@@ -305,11 +375,9 @@ func resolveClassHandle(rootHandle int, classID string, classMinor int) string {
 	return fmt.Sprintf("%d:%d", rootHandle, classMinor)
 }
 
-// cleanupNodeTrafficControl handles selector-aware deletion of TC rules
 func (r *VlanTrafficControlReconciler) cleanupNodeTrafficControl(ctx context.Context, instance *v1alpha1.VlanTrafficControl, namespace string) error {
 	logger := log.FromContext(ctx)
 
-	// List remaining active CRs in the cluster
 	var allCRs v1alpha1.VlanTrafficControlList
 	if err := r.List(ctx, &allCRs); err != nil {
 		return fmt.Errorf("failed listing CRs during cleanup evaluation: %w", err)
@@ -327,18 +395,15 @@ func (r *VlanTrafficControlReconciler) cleanupNodeTrafficControl(ctx context.Con
 			continue
 		}
 
-		// Fetch host Node object to evaluate label/selector targeting
 		var hostNode corev1.Node
 		_ = r.Get(ctx, types.NamespacedName{Name: agentPod.Spec.NodeName}, &hostNode)
 
-		// Determine if ANY remaining active CR still targets THIS SPECIFIC NODE & interface
 		nodeHasRemainingCR := false
 		for _, cr := range allCRs.Items {
 			if cr.Name == instance.Name {
-				continue // Skip the CR currently being deleted
+				continue
 			}
 			if cr.Spec.HtbRoot.Interface == instance.Spec.HtbRoot.Interface {
-				// Evaluate if remaining CR targets this hostNode via NodeSelector or NodeLabelSelector
 				if executor.IsPolicyTargetingNode(&hostNode, &cr, logger) {
 					nodeHasRemainingCR = true
 					break
@@ -347,7 +412,6 @@ func (r *VlanTrafficControlReconciler) cleanupNodeTrafficControl(ctx context.Con
 		}
 
 		if nodeHasRemainingCR {
-			// Other CRs target this node on this interface -> Re-sync rules without wiping interface
 			url := fmt.Sprintf("http://%s:8080/reconcile", agentPod.Status.PodIP)
 			resp, err := httpClient.Post(url, "application/json", nil)
 			if err == nil {
@@ -355,7 +419,6 @@ func (r *VlanTrafficControlReconciler) cleanupNodeTrafficControl(ctx context.Con
 			}
 			logger.Info("Triggered selective re-sync on agent pod", "node", agentPod.Spec.NodeName, "interface", instance.Spec.HtbRoot.Interface)
 		} else {
-			// No remaining CR targets this node on this interface -> Flush interface on this node ONLY
 			url := fmt.Sprintf("http://%s:8080/cleanup?interface=%s", agentPod.Status.PodIP, instance.Spec.HtbRoot.Interface)
 			req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 			if err != nil {
@@ -376,7 +439,7 @@ func getAgentImage() string {
 	if img := os.Getenv("RELATED_IMAGE_AGENT"); img != "" {
 		return img
 	}
-	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.3.3"
+	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.3.57"
 }
 
 func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(
@@ -388,7 +451,6 @@ func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(
 	privilegedVal := true
 	hostPathDir := corev1.HostPathDirectory
 
-	// ALWAYS include Master / Control-Plane base tolerations so agents can schedule on tainted nodes
 	baseTolerations := []corev1.Toleration{
 		{
 			Key:      "node-role.kubernetes.io/master",
@@ -402,7 +464,6 @@ func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(
 		},
 	}
 
-	// Merge user-defined tolerations without duplicates
 	for _, userTol := range userTolerations {
 		isDuplicate := false
 		for _, baseTol := range baseTolerations {
@@ -437,8 +498,8 @@ func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(
 					HostNetwork:        true,
 					HostPID:            true,
 					ServiceAccountName: "vlan-traffic-control-manager",
-					NodeSelector:        nodeSelector,
-					Tolerations:         baseTolerations,
+					NodeSelector:       nodeSelector,
+					Tolerations:        baseTolerations,
 					Containers: []corev1.Container{
 						{
 							Name:            "agent",
@@ -549,10 +610,10 @@ func (r *VlanTrafficControlReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.VlanTrafficControl{}).
 		Owns(&appsv1.DaemonSet{}).
+		Owns(&v1alpha1.VlanTrafficControlClass{}).
 		Complete(r)
 }
 
-// triggerAgentReconcile notifies all running agent pods to immediately re-apply TC rules
 func (r *VlanTrafficControlReconciler) triggerAgentReconcile(ctx context.Context, namespace string) {
 	logger := log.FromContext(ctx)
 

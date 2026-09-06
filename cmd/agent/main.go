@@ -58,7 +58,7 @@ func main() {
 	log.Info("=== Starting VLAN Traffic Control Agent ===", "pid", os.Getpid())
 
 	// 1. Ensure Kernel Modules are loaded
-	log.Info("[BOOT] Verifying kernel modules (sch_htb, cls_flower, act_police)...")
+	log.Info("[BOOT] Verifying kernel modules (sch_htb, cls_flower, act_police, ifb)...")
 	if err := executor.EnsureKernelModulesLoaded("auto", log); err != nil {
 		log.Error(err, "[BOOT] Warning/Error ensuring kernel modules on host node")
 	} else {
@@ -116,14 +116,12 @@ func main() {
 					rootHandle = 1
 				}
 
-				// Resolve dynamic default class handle
 				defaultHandle := resolveDefaultClassHandle(&item.Spec.HtbRoot, rootHandle)
 				defaultClassHandles[defaultHandle] = true
 				if _, exists := classMap[defaultHandle]; !exists {
 					classMap[defaultHandle] = "default-fallback"
 				}
 
-				// Map user-defined class names
 				for _, cls := range item.Spec.HtbRoot.Classes {
 					cHandle := cls.GetClassID(rootHandle)
 					if cls.Name != "" {
@@ -133,7 +131,6 @@ func main() {
 			}
 		}
 
-		// Fallback default handle if no CR targeting this node
 		if len(defaultClassHandles) == 0 {
 			defaultClassHandles["1:99"] = true
 			classMap["1:99"] = "default-fallback"
@@ -141,7 +138,6 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 
-		// CASE 1: Generic GET /stats (No interface parameter specified)
 		if ifaceParam == "" {
 			activeIfaces := discoverActiveTcInterfaces(log)
 			allStats := make([]networkingv1alpha1.InterfaceStats, 0)
@@ -176,14 +172,12 @@ func main() {
 			return
 		}
 
-		// CASE 2: GET /stats?interface=enp1s0.default
 		isDefaultQuery := false
 		if strings.HasSuffix(ifaceParam, ".default") {
 			isDefaultQuery = true
 			ifaceParam = strings.TrimSuffix(ifaceParam, ".default")
 		}
 
-		// CASE 3: Single Interface Query
 		stats, errStats := executor.GetInterfaceStatsFiltered(ifaceParam, classMap, targetVlan, targetClassID)
 		if errStats != nil {
 			log.Error(errStats, "[API] Failed retrieving Netlink stats", "interface", ifaceParam)
@@ -236,6 +230,13 @@ func main() {
 		} else {
 			log.Info("[CLEANUP] Interface successfully flushed (root & ingress qdiscs removed)", "interface", iface)
 		}
+
+		ifbName := fmt.Sprintf("ifb-%s", iface)
+		if len(ifbName) > 15 {
+			ifbName = ifbName[:15]
+		}
+		_ = executor.FlushInterface(ifbName)
+
 		log.Info("========================================================================")
 
 		w.Header().Set("Content-Type", "application/json")
@@ -284,6 +285,8 @@ func main() {
 		aggregatedSpec.Rate = "10Gbit"
 
 		hasMatchingPolicy := false
+		classMap := make(map[string]*networkingv1alpha1.ClassSpec)
+
 		for _, item := range list.Items {
 			if !isPolicyTargetingNode(hostNode, nodeName, &item, log) {
 				continue
@@ -301,8 +304,35 @@ func main() {
 					aggregatedSpec.Rate = item.Spec.HtbRoot.Rate
 				}
 
-				aggregatedSpec.Classes = append(aggregatedSpec.Classes, item.Spec.HtbRoot.Classes...)
+				// Deduplicate and merge class specifications by ClassID
+				for _, cls := range item.Spec.HtbRoot.Classes {
+					cID := cls.GetClassID(aggregatedSpec.HtbID)
+					existing, found := classMap[cID]
+					if !found {
+						clsCopy := cls
+						classMap[cID] = &clsCopy
+					} else {
+						if cls.IngressRate != "" {
+							existing.IngressRate = cls.IngressRate
+							existing.IngressCeil = cls.IngressCeil
+							existing.IngressBurst = cls.IngressBurst
+							existing.IngressAction = cls.IngressAction
+						}
+						if cls.EgressRate != "" {
+							existing.EgressRate = cls.EgressRate
+							existing.EgressCeil = cls.EgressCeil
+							existing.EgressBurst = cls.EgressBurst
+						}
+						if cls.Priority > 0 {
+							existing.Priority = cls.Priority
+						}
+					}
+				}
 			}
+		}
+
+		for _, cls := range classMap {
+			aggregatedSpec.Classes = append(aggregatedSpec.Classes, *cls)
 		}
 
 		if !hasMatchingPolicy {
@@ -332,7 +362,6 @@ func main() {
 	}
 }
 
-// Helper: Safely resolve default class handle (e.g. "1:99", "1:254") from HtbRootSpec
 func resolveDefaultClassHandle(root *networkingv1alpha1.HtbRootSpec, rootHandle int) string {
 	if root.DefaultClassID != "" {
 		if strings.Contains(root.DefaultClassID, ":") {
@@ -347,7 +376,6 @@ func resolveDefaultClassHandle(root *networkingv1alpha1.HtbRootSpec, rootHandle 
 	return fmt.Sprintf("%d:%d", rootHandle, defaultMinor)
 }
 
-// Helper: Discover active host network interfaces relevant for Traffic Control
 func discoverActiveTcInterfaces(log logr.Logger) []string {
 	cmd := exec.Command("tc", "qdisc", "show")
 	out, err := cmd.CombinedOutput()
@@ -372,7 +400,7 @@ func discoverActiveTcInterfaces(log logr.Logger) []string {
 					strings.HasPrefix(iface, "genev_") ||
 					strings.HasPrefix(iface, "ovn-k8s") ||
 					strings.HasPrefix(iface, "veth") ||
-					len(iface) >= 15 {
+					(len(iface) >= 15 && !strings.HasPrefix(iface, "ifb-")) {
 					continue
 				}
 
@@ -410,6 +438,7 @@ func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger)
 
 	specsByInterface := make(map[string]*networkingv1alpha1.HtbRootSpec)
 	strategyByInterface := make(map[string]networkingv1alpha1.TcStrategyType)
+	classMapsByInterface := make(map[string]map[string]*networkingv1alpha1.ClassSpec)
 
 	allKnownInterfaces := make(map[string]bool)
 
@@ -437,13 +466,48 @@ func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger)
 			}
 			specsByInterface[iface] = aggSpec
 			strategyByInterface[iface] = item.Spec.TcStrategy
+			classMapsByInterface[iface] = make(map[string]*networkingv1alpha1.ClassSpec)
 		} else {
 			if item.Spec.HtbRoot.HtbID > 0 {
 				aggSpec.HtbID = item.Spec.HtbRoot.HtbID
 			}
+			if strings.ToLower(string(item.Spec.TcStrategy)) == "ifb" {
+				strategyByInterface[iface] = item.Spec.TcStrategy
+			}
 		}
 
-		aggSpec.Classes = append(aggSpec.Classes, item.Spec.HtbRoot.Classes...)
+		cMap := classMapsByInterface[iface]
+		for _, cls := range item.Spec.HtbRoot.Classes {
+			cID := cls.GetClassID(aggSpec.HtbID)
+			existing, found := cMap[cID]
+			if !found {
+				clsCopy := cls
+				cMap[cID] = &clsCopy
+			} else {
+				if cls.IngressRate != "" {
+					existing.IngressRate = cls.IngressRate
+					existing.IngressCeil = cls.IngressCeil
+					existing.IngressBurst = cls.IngressBurst
+					existing.IngressAction = cls.IngressAction
+				}
+				if cls.EgressRate != "" {
+					existing.EgressRate = cls.EgressRate
+					existing.EgressCeil = cls.EgressCeil
+					existing.EgressBurst = cls.EgressBurst
+				}
+				if cls.Priority > 0 {
+					existing.Priority = cls.Priority
+				}
+			}
+		}
+	}
+
+	for iface, aggSpec := range specsByInterface {
+		cMap := classMapsByInterface[iface]
+		aggSpec.Classes = []networkingv1alpha1.ClassSpec{}
+		for _, cls := range cMap {
+			aggSpec.Classes = append(aggSpec.Classes, *cls)
+		}
 	}
 
 	for iface := range allKnownInterfaces {
@@ -462,11 +526,57 @@ func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger)
 		log.Info("----------------------------------------------------------------")
 		log.Info("[RECONCILE] Applying Aggregated Interface Spec", "interface", iface, "totalClasses", len(aggSpec.Classes), "strategy", strategy)
 
-		strategyUsed, err := executor.ApplyAdaptiveHtbHierarchy(aggSpec, strategy, log)
-		if err != nil {
-			log.Error(err, "[RECONCILE] Failed applying aggregated TC rules", "interface", iface, "strategy", strategyUsed)
+		var err error
+
+		// Step 1: Egress HTB Hierarchy
+		hasEgressRules := false
+		egressSpec := *aggSpec
+		var egressClasses []networkingv1alpha1.ClassSpec
+		for _, cls := range aggSpec.Classes {
+			if cls.EgressRate != "" {
+				hasEgressRules = true
+				egressClasses = append(egressClasses, cls)
+			}
+		}
+		egressSpec.Classes = egressClasses
+
+		if hasEgressRules {
+			log.Info("[RECONCILE] Applying Egress HTB Hierarchy on physical interface", "interface", iface)
+			if errEgress := executor.ApplyHtbHierarchy(&egressSpec, log); errEgress != nil {
+				log.Error(errEgress, "[RECONCILE] Failed applying egress HTB hierarchy", "interface", iface)
+				err = errEgress
+			}
+		}
+
+		// Step 2: Ingress Handling (IFB vs Stateless Flower Policing)
+		if strings.ToLower(string(strategy)) == "ifb" {
+			log.Info("[RECONCILE] Executing IFB Ingress Redirect and Ingress HTB Shaping", "interface", iface)
+			if errIfb := executor.ReconcileIngressHtb(aggSpec, log); errIfb != nil {
+				log.Error(errIfb, "[RECONCILE] Failed executing IFB ingress reconciliation", "interface", iface)
+				err = errIfb
+			}
 		} else {
-			log.Info("[RECONCILE] Successfully applied aggregated TC rules on host interface", "interface", iface, "strategy", strategyUsed)
+			// Stateless policing on physical interface for non-IFB strategy
+			hasIngressRules := false
+			for _, cls := range aggSpec.Classes {
+				if cls.IngressRate != "" {
+					hasIngressRules = true
+					break
+				}
+			}
+			if hasIngressRules {
+				log.Info("[RECONCILE] Executing Stateless Ingress Policing Filters", "interface", iface)
+				if errIngress := executor.ReconcileStatelessIngress(aggSpec, log); errIngress != nil {
+					log.Error(errIngress, "[RECONCILE] Failed applying stateless ingress policing filters", "interface", iface)
+					err = errIngress
+				}
+			}
+		}
+
+		if err != nil {
+			log.Error(err, "[RECONCILE] Failed applying aggregated TC rules", "interface", iface)
+		} else {
+			log.Info("[RECONCILE] Successfully applied aggregated TC rules on host interface", "interface", iface)
 		}
 		log.Info("----------------------------------------------------------------")
 	}

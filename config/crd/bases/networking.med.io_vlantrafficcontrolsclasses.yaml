@@ -1,0 +1,127 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.1
+  name: vlantrafficcontrolsclasses.networking.med.io
+spec:
+  group: networking.med.io
+  names:
+    kind: VlanTrafficControlClass
+    listKind: VlanTrafficControlClassList
+    plural: vlantrafficcontrolsclasses
+    shortNames:
+    - vtcclass
+    - vtcclasses
+    singular: vlantrafficcontrolclass
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.className
+      name: CLASS_NAME
+      type: string
+    - jsonPath: .spec.direction
+      name: DIRECTION
+      type: string
+    - jsonPath: .spec.classId
+      name: CLASS_ID
+      type: string
+    - jsonPath: .spec.vlanId
+      name: VLAN_ID
+      type: integer
+    - jsonPath: .spec.guaranteed
+      name: GUARANTEED
+      type: string
+    - jsonPath: .spec.ceilBorrow
+      name: CEIL_BORROW
+      type: string
+    - jsonPath: .spec.ingressRate
+      name: INGRESS_RATE
+      type: string
+    - jsonPath: .spec.ingressCeil
+      name: INGRESS_CEIL
+      type: string
+    - jsonPath: .spec.aligned
+      name: ALIGNED
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              aligned:
+                type: string
+              ceilBorrow:
+                type: string
+              classId:
+                type: string
+              className:
+                type: string
+              direction:
+                type: string
+              dscp:
+                type: integer
+              egressBurst:
+                type: string
+              enableFqCodel:
+                type: boolean
+              guaranteed:
+                type: string
+              ingressAction:
+                description: IngressAction defines the action taken on packets exceeding
+                  the policed rate limit.
+                enum:
+                - drop
+                - pass
+                type: string
+              ingressBurst:
+                type: string
+              ingressCeil:
+                type: string
+              ingressRate:
+                type: string
+              ip:
+                type: string
+              mark:
+                format: int32
+                type: integer
+              matchType:
+                type: string
+              port:
+                type: integer
+              priority:
+                type: integer
+              subnet:
+                type: string
+              vlanId:
+                type: integer
+            required:
+            - classId
+            - className
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources: {}

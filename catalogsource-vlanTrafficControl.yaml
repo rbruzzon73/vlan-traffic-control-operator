@@ -5,10 +5,9 @@ metadata:
   # MUST be openshift-marketplace for OperatorHub UI visibility
   namespace: openshift-marketplace
 spec:
-  displayName: VLAN Traffic Control Operator Catalog
-  publisher: Custom
+  displayName: Community
   sourceType: grpc
-  image: ghcr.io/rbruzzon73/vlan-traffic-control-catalog:v0.3.2
+  image: ghcr.io/rbruzzon73/vlan-traffic-control-catalog:v0.3.57
   updateStrategy:
     registryPoll:
       interval: 30m

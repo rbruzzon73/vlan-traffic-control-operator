@@ -1,0 +1,46 @@
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: vlan-tc-combined
+  namespace: openshift-vlan-tc-operator
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  tcStrategy: ifb
+  htbRoot:
+    interface: enp1s0
+    rate: 10Gbit
+    defaultClassId: "1:99"
+    defaultClassMinor: 99
+    classes:
+      # Default Control-Plane Fallback (etcd, API)
+      - name: default-fallback
+        classId: "1:99"
+        priority: 0
+        egressRate: 100Mbit
+        egressCeil: 10Gbit
+        ingressRate: 100Mbit
+        enableFqCodel: true
+
+      # High Priority (VLAN 100)
+      - name: vlan-100-high-priority
+        classId: "1:100"
+        vlanId: 100
+        matchType: subnet
+        subnet: 10.0.100.0/24
+        priority: 1
+        egressRate: 2Gbit
+        egressCeil: 10Gbit
+        ingressRate: 2Gbit
+        enableFqCodel: true
+
+      # KubeVirt Migration (VLAN 380) - Full borrowing on both directions!
+      - name: vlan-380-migration
+        classId: "1:380"
+        vlanId: 380
+        matchType: vlan
+        priority: 3
+        egressRate: 500Mbit
+        egressCeil: 10Gbit       # Borrow up to 10G on egress
+        ingressRate: 500Mbit     # Guaranteed 500M floor on ingress
+        enableFqCodel: true

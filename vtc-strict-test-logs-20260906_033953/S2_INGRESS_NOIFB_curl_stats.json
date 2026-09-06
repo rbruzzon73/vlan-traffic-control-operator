@@ -1,0 +1,34 @@
+{
+  "interface": "enp1s0",
+  "node": "hub-worker01.ocp4-hub.test.com",
+  "classStats": [],
+  "ingressStats": [
+    {
+      "interface": "enp1s0",
+      "classId": "1:99",
+      "filterId": "pref-1-handle-1",
+      "direction": "ingress",
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0
+    },
+    {
+      "interface": "enp1s0",
+      "classId": "1:100",
+      "filterId": "pref-2-handle-1",
+      "direction": "ingress",
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0
+    },
+    {
+      "interface": "enp1s0",
+      "classId": "1:280",
+      "filterId": "pref-3-handle-1",
+      "direction": "ingress",
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0
+    }
+  ]
+}

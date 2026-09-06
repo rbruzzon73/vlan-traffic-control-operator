@@ -1,0 +1,178 @@
+{
+  "node": "hub-worker01.ocp4-hub.test.com",
+  "interface": "enp1s0",
+  "isAligned": true,
+  "desired": {
+    "interface": "enp1s0",
+    "htbId": 1,
+    "defaultClassId": "1:99",
+    "rate": "10Gbit",
+    "classes": [
+      {
+        "name": "vlan-280-medium",
+        "classId": "1:280",
+        "matchType": "vlan",
+        "vlanId": 280,
+        "egressRate": "1Gbit",
+        "egressCeil": "4Gbit",
+        "egressBurst": "25k",
+        "enableFqCodel": true,
+        "ingressRate": "1.5Gbit",
+        "ingressBurst": "30k",
+        "priority": 2
+      },
+      {
+        "name": "vlan-380-migration",
+        "classId": "1:380",
+        "matchType": "vlan",
+        "vlanId": 380,
+        "egressRate": "500Mbit",
+        "egressCeil": "8Gbit",
+        "egressBurst": "70k",
+        "enableFqCodel": true,
+        "ingressRate": "2Gbit",
+        "ingressBurst": "60k",
+        "priority": 3
+      },
+      {
+        "name": "default-fallback",
+        "classId": "1:99",
+        "egressRate": "100Mbit",
+        "egressCeil": "1Gbit",
+        "egressBurst": "15k",
+        "enableFqCodel": true
+      },
+      {
+        "name": "vlan-100-high",
+        "classId": "1:100",
+        "matchType": "subnet",
+        "vlanId": 100,
+        "subnet": "10.0.100.0/24",
+        "egressRate": "2Gbit",
+        "egressCeil": "6Gbit",
+        "egressBurst": "45k",
+        "enableFqCodel": true,
+        "ingressRate": "3Gbit",
+        "ingressBurst": "50k",
+        "priority": 1
+      }
+    ]
+  },
+  "actual": {
+    "htbQdiscPresent": true,
+    "ingressPresent": true,
+    "clsactPresent": true,
+    "classes": [
+      {
+        "name": "vlan-380-migration",
+        "classId": "1:380",
+        "matchType": "vlan",
+        "vlanId": 380,
+        "egressRate": "500Mbit",
+        "egressCeil": "8Gbit",
+        "egressBurst": "70k",
+        "enableFqCodel": true,
+        "ingressRate": "2Gbit",
+        "ingressBurst": "60k",
+        "priority": 3
+      },
+      {
+        "name": "default-fallback",
+        "classId": "1:99",
+        "egressRate": "100Mbit",
+        "egressCeil": "1Gbit",
+        "egressBurst": "15k",
+        "enableFqCodel": true
+      },
+      {
+        "name": "vlan-100-high",
+        "classId": "1:100",
+        "matchType": "subnet",
+        "vlanId": 100,
+        "subnet": "10.0.100.0/24",
+        "egressRate": "2Gbit",
+        "egressCeil": "6Gbit",
+        "egressBurst": "45k",
+        "enableFqCodel": true,
+        "ingressRate": "3Gbit",
+        "ingressBurst": "50k",
+        "priority": 1
+      },
+      {
+        "name": "vlan-280-medium",
+        "classId": "1:280",
+        "matchType": "vlan",
+        "vlanId": 280,
+        "egressRate": "1Gbit",
+        "egressCeil": "4Gbit",
+        "egressBurst": "25k",
+        "enableFqCodel": true,
+        "ingressRate": "1.5Gbit",
+        "ingressBurst": "30k",
+        "priority": 2
+      }
+    ],
+    "ingressFilters": [
+      {
+        "priority": 1,
+        "handle": 1,
+        "interface": "enp1s0",
+        "type": "flower",
+        "protocol": 33024,
+        "name": "vlan-100-high",
+        "matchType": "subnet",
+        "vlanId": 100,
+        "subnet": "10.0.100.0",
+        "ingressRate": "3Gbit",
+        "ingressBurst": "50k",
+        "action": "police drop",
+        "matches": {
+          "dst_ip": "10.0.100.0",
+          "eth_type": "0x8100",
+          "vlan_id": "100"
+        }
+      },
+      {
+        "priority": 2,
+        "handle": 1,
+        "interface": "enp1s0",
+        "type": "flower",
+        "protocol": 33024,
+        "name": "vlan-280-medium",
+        "matchType": "vlan",
+        "vlanId": 280,
+        "ingressRate": "1.5Gbit",
+        "ingressBurst": "30k",
+        "action": "police drop",
+        "matches": {
+          "eth_type": "0x8100",
+          "vlan_id": "280"
+        }
+      },
+      {
+        "priority": 3,
+        "handle": 1,
+        "interface": "enp1s0",
+        "type": "flower",
+        "protocol": 33024,
+        "name": "default-fallback",
+        "vlanId": 380,
+        "action": "police drop",
+        "matches": {
+          "eth_type": "0x8100",
+          "vlan_id": "380"
+        }
+      },
+      {
+        "priority": 49152,
+        "handle": 1,
+        "interface": "enp1s0",
+        "type": "flower",
+        "protocol": 3,
+        "name": "enp1s0",
+        "action": "police drop"
+      }
+    ]
+  },
+  "driftDeltas": []
+}

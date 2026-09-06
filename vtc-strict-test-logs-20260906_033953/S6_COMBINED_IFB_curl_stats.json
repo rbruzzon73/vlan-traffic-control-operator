@@ -1,0 +1,183 @@
+{
+  "interface": "enp1s0",
+  "node": "hub-worker01.ocp4-hub.test.com",
+  "classStats": [
+    {
+      "interface": "enp1s0",
+      "classId": "1:99",
+      "name": "default-fallback",
+      "direction": "egress",
+      "prio": 0,
+      "bytes": 1790288,
+      "packets": 2019,
+      "drops": 0,
+      "overlimits": 280,
+      "borrowed": 0
+    },
+    {
+      "interface": "enp1s0",
+      "classId": "1:100",
+      "name": "vlan-100-high",
+      "direction": "egress",
+      "prio": 1,
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0,
+      "overlimits": 0,
+      "borrowed": 0
+    },
+    {
+      "interface": "enp1s0",
+      "classId": "1:280",
+      "name": "vlan-280-medium",
+      "direction": "egress",
+      "prio": 2,
+      "bytes": 208,
+      "packets": 4,
+      "drops": 0,
+      "overlimits": 0,
+      "borrowed": 0
+    },
+    {
+      "interface": "enp1s0",
+      "classId": "1:380",
+      "name": "vlan-380-migration",
+      "direction": "egress",
+      "prio": 3,
+      "bytes": 208,
+      "packets": 4,
+      "drops": 0,
+      "overlimits": 0,
+      "borrowed": 0
+    },
+    {
+      "interface": "ifb-enp1s0",
+      "classId": "1:99",
+      "name": "default-fallback",
+      "direction": "ingress",
+      "prio": 0,
+      "bytes": 911265,
+      "packets": 1194,
+      "drops": 0,
+      "overlimits": 182,
+      "borrowed": 0
+    },
+    {
+      "interface": "ifb-enp1s0",
+      "classId": "1:100",
+      "name": "vlan-100-high",
+      "direction": "ingress",
+      "prio": 1,
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0,
+      "overlimits": 0,
+      "borrowed": 0
+    },
+    {
+      "interface": "ifb-enp1s0",
+      "classId": "1:280",
+      "name": "vlan-280-medium",
+      "direction": "ingress",
+      "prio": 2,
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0,
+      "overlimits": 0,
+      "borrowed": 0
+    },
+    {
+      "interface": "ifb-enp1s0",
+      "classId": "1:380",
+      "name": "vlan-380-migration",
+      "direction": "ingress",
+      "prio": 3,
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0,
+      "overlimits": 0,
+      "borrowed": 0
+    }
+  ],
+  "ingressStats": [
+    {
+      "interface": "enp1s0",
+      "classId": "1:99",
+      "filterId": "pref-1-handle-1",
+      "direction": "ingress",
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0
+    },
+    {
+      "interface": "enp1s0",
+      "classId": "1:99",
+      "filterId": "pref-1-handle-1",
+      "direction": "ingress",
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0
+    },
+    {
+      "interface": "enp1s0",
+      "classId": "1:100",
+      "filterId": "pref-2-handle-1",
+      "direction": "ingress",
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0
+    },
+    {
+      "interface": "enp1s0",
+      "classId": "1:280",
+      "filterId": "pref-3-handle-1",
+      "direction": "ingress",
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0
+    },
+    {
+      "interface": "enp1s0",
+      "filterId": "pref-49152-handle-1",
+      "direction": "ingress",
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0
+    },
+    {
+      "interface": "ifb-enp1s0",
+      "classId": "1:99",
+      "filterId": "pref-1-handle-1",
+      "direction": "ingress",
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0
+    },
+    {
+      "interface": "ifb-enp1s0",
+      "classId": "1:100",
+      "filterId": "pref-2-handle-1",
+      "direction": "ingress",
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0
+    },
+    {
+      "interface": "ifb-enp1s0",
+      "classId": "1:280",
+      "filterId": "pref-3-handle-1",
+      "direction": "ingress",
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0
+    },
+    {
+      "interface": "ifb-enp1s0",
+      "filterId": "pref-49152-handle-1",
+      "direction": "ingress",
+      "bytes": 0,
+      "packets": 0,
+      "drops": 0
+    }
+  ]
+}

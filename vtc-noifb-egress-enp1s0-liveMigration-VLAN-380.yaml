@@ -1,0 +1,58 @@
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: vlan-tc-egress
+  namespace: openshift-vlan-tc-operator
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  tcStrategy: flower
+  htbRoot:
+    interface: enp1s0
+    rate: 10Gbit
+    defaultClassId: "1:99"
+    defaultClassMinor: 99
+    classes:
+      # Priority 0: Highest priority control plane / etcd / API / SSH
+      - name: default-fallback
+        classId: "1:99"
+        priority: 0
+        egressRate: 100Mbit
+        egressCeil: 10Gbit
+        egressBurst: 50k
+        enableFqCodel: true
+
+      # Priority 1: High priority workloads
+      - name: vlan-100-high-priority
+        classId: "1:100"
+        vlanId: 100
+        matchType: subnet
+        subnet: 10.0.100.0/24
+        priority: 1
+        egressRate: 2Gbit
+        egressCeil: 10Gbit
+        egressBurst: 50k
+        enableFqCodel: true
+
+      # Priority 2: Middle priority workloads
+      - name: vlan-280-middle-priority
+        classId: "1:280"
+        vlanId: 280
+        matchType: subnet
+        subnet: 10.0.218.0/24
+        priority: 2
+        egressRate: 1Gbit
+        egressCeil: 10Gbit
+        egressBurst: 30k
+        enableFqCodel: true
+
+      # Priority 3: Migration (Guaranteed 500M, can burst to full 10G if link is idle)
+      - name: vlan-380-low-priority-migration
+        classId: "1:380"
+        vlanId: 380
+        matchType: vlan
+        priority: 3
+        egressRate: 500Mbit
+        egressCeil: 10Gbit
+        egressBurst: 50k
+        enableFqCodel: true

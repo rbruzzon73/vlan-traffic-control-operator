@@ -27,10 +27,12 @@ if [ -d "config/deploy" ]; then
     -exec sed -i -E "s|(vlan-traffic-control-operator:v)[0-9]+\.[0-9]+\.[0-9]+|\1${NEW_VERSION}|g" {} +
 fi
 
-# 3. Update base CSV manifests
+# 3. Update base CSV manifests (Includes CSV metadata name, version field, and image tags)
 if [ -d "config/manifests" ]; then
   echo "--> Updating CSV base manifests..."
   find config/manifests -type f \( -name "*.yaml" -o -name "*.yml" \) \
+    -exec sed -i "s/vlan-traffic-control.v${OLD_VERSION}/vlan-traffic-control.v${NEW_VERSION}/g" {} + \
+    -exec sed -i -E "s/^(  version: ).*/\1${NEW_VERSION}/g" {} + \
     -exec sed -i -E "s|(vlan-traffic-control-operator:v)[0-9]+\.[0-9]+\.[0-9]+|\1${NEW_VERSION}|g" {} + \
     -exec sed -i -E "s|(vlan-traffic-control-agent:v)[0-9]+\.[0-9]+\.[0-9]+|\1${NEW_VERSION}|g" {} +
 fi
@@ -40,6 +42,7 @@ if [ -d "bundle" ]; then
   echo "--> Updating references in bundle manifests..."
   find bundle/ -type f \( -name "*.yaml" -o -name "*.yml" \) \
     -exec sed -i "s/vlan-traffic-control.v${OLD_VERSION}/vlan-traffic-control.v${NEW_VERSION}/g" {} + \
+    -exec sed -i -E "s/^(  version: ).*/\1${NEW_VERSION}/g" {} + \
     -exec sed -i -E "s|(vlan-traffic-control-operator:v)[0-9]+\.[0-9]+\.[0-9]+|\1${NEW_VERSION}|g" {} + \
     -exec sed -i -E "s|(vlan-traffic-control-agent:v)[0-9]+\.[0-9]+\.[0-9]+|\1${NEW_VERSION}|g" {} + \
     -exec sed -i -E "s|(vlan-traffic-control-bundle:v)[0-9]+\.[0-9]+\.[0-9]+|\1${NEW_VERSION}|g" {} +

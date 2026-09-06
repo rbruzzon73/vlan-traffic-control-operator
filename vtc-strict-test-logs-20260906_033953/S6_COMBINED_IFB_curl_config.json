@@ -1,0 +1,203 @@
+{
+  "node": "hub-worker01.ocp4-hub.test.com",
+  "interface": "enp1s0",
+  "isAligned": true,
+  "desired": {
+    "interface": "enp1s0",
+    "htbId": 1,
+    "defaultClassId": "1:99",
+    "rate": "10Gbit",
+    "classes": [
+      {
+        "name": "default-fallback",
+        "classId": "1:99",
+        "egressRate": "100Mbit",
+        "egressCeil": "2Gbit",
+        "egressBurst": "15k",
+        "enableFqCodel": true,
+        "ingressRate": "200Mbit",
+        "ingressCeil": "10Gbit",
+        "ingressBurst": "20k"
+      },
+      {
+        "name": "vlan-100-high",
+        "classId": "1:100",
+        "matchType": "subnet",
+        "vlanId": 100,
+        "subnet": "10.0.100.0/24",
+        "egressRate": "2Gbit",
+        "egressCeil": "5Gbit",
+        "egressBurst": "50k",
+        "enableFqCodel": true,
+        "ingressRate": "3Gbit",
+        "ingressCeil": "10Gbit",
+        "ingressBurst": "60k",
+        "priority": 1
+      },
+      {
+        "name": "vlan-280-medium",
+        "classId": "1:280",
+        "matchType": "vlan",
+        "vlanId": 280,
+        "egressRate": "1Gbit",
+        "egressCeil": "4Gbit",
+        "egressBurst": "30k",
+        "enableFqCodel": true,
+        "ingressRate": "1.5Gbit",
+        "ingressCeil": "8Gbit",
+        "ingressBurst": "40k",
+        "priority": 2
+      },
+      {
+        "name": "vlan-380-migration",
+        "classId": "1:380",
+        "matchType": "vlan",
+        "vlanId": 380,
+        "egressRate": "500Mbit",
+        "egressCeil": "3Gbit",
+        "egressBurst": "70k",
+        "enableFqCodel": true,
+        "ingressRate": "1Gbit",
+        "ingressCeil": "10Gbit",
+        "ingressBurst": "90k",
+        "priority": 3
+      }
+    ]
+  },
+  "actual": {
+    "ifbInterface": "ifb-enp1s0",
+    "htbQdiscPresent": true,
+    "ingressPresent": true,
+    "clsactPresent": true,
+    "classes": [
+      {
+        "name": "default-fallback",
+        "classId": "1:99",
+        "egressRate": "100Mbit",
+        "egressCeil": "2Gbit",
+        "egressBurst": "15k",
+        "enableFqCodel": true,
+        "ingressRate": "200Mbit",
+        "ingressCeil": "10Gbit",
+        "ingressBurst": "20k"
+      },
+      {
+        "name": "vlan-100-high",
+        "classId": "1:100",
+        "matchType": "subnet",
+        "vlanId": 100,
+        "subnet": "10.0.100.0/24",
+        "egressRate": "2Gbit",
+        "egressCeil": "5Gbit",
+        "egressBurst": "50k",
+        "enableFqCodel": true,
+        "ingressRate": "3Gbit",
+        "ingressCeil": "10Gbit",
+        "ingressBurst": "60k",
+        "priority": 1
+      },
+      {
+        "name": "vlan-280-medium",
+        "classId": "1:280",
+        "matchType": "vlan",
+        "vlanId": 280,
+        "egressRate": "1Gbit",
+        "egressCeil": "4Gbit",
+        "egressBurst": "30k",
+        "enableFqCodel": true,
+        "ingressRate": "1500Mbit",
+        "ingressCeil": "8Gbit",
+        "ingressBurst": "40k",
+        "priority": 2
+      },
+      {
+        "name": "vlan-380-migration",
+        "classId": "1:380",
+        "matchType": "vlan",
+        "vlanId": 380,
+        "egressRate": "500Mbit",
+        "egressCeil": "3Gbit",
+        "egressBurst": "70k",
+        "enableFqCodel": true,
+        "ingressRate": "1Gbit",
+        "ingressCeil": "10Gbit",
+        "ingressBurst": "90k",
+        "priority": 3
+      }
+    ],
+    "ingressFilters": [
+      {
+        "priority": 1,
+        "handle": 1,
+        "interface": "enp1s0",
+        "type": "matchall",
+        "protocol": 3,
+        "name": "Ingress traffic enp1s0",
+        "action": "mirred redirect dev ifb-enp1s0"
+      },
+      {
+        "priority": 1,
+        "handle": 1,
+        "interface": "ifb-enp1s0",
+        "type": "flower",
+        "protocol": 33024,
+        "name": "vlan-100-high",
+        "matchType": "subnet",
+        "vlanId": 100,
+        "subnet": "10.0.100.0",
+        "ingressRate": "3Gbit",
+        "ingressBurst": "60k",
+        "action": "htb classify",
+        "matches": {
+          "dst_ip": "10.0.100.0",
+          "eth_type": "0x8100",
+          "vlan_id": "100"
+        }
+      },
+      {
+        "priority": 2,
+        "handle": 1,
+        "interface": "ifb-enp1s0",
+        "type": "flower",
+        "protocol": 33024,
+        "name": "vlan-280-medium",
+        "matchType": "vlan",
+        "vlanId": 280,
+        "ingressRate": "1.5Gbit",
+        "ingressBurst": "40k",
+        "action": "htb classify",
+        "matches": {
+          "eth_type": "0x8100",
+          "vlan_id": "280"
+        }
+      },
+      {
+        "priority": 3,
+        "handle": 1,
+        "interface": "ifb-enp1s0",
+        "type": "flower",
+        "protocol": 33024,
+        "name": "vlan-380-migration",
+        "matchType": "vlan",
+        "vlanId": 380,
+        "ingressRate": "1Gbit",
+        "ingressBurst": "90k",
+        "action": "htb classify",
+        "matches": {
+          "eth_type": "0x8100",
+          "vlan_id": "380"
+        }
+      },
+      {
+        "priority": 49152,
+        "handle": 1,
+        "interface": "ifb-enp1s0",
+        "type": "flower",
+        "protocol": 3,
+        "name": "ifb-enp1s0",
+        "action": "htb classify"
+      }
+    ]
+  },
+  "driftDeltas": []
+}

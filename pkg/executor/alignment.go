@@ -23,7 +23,7 @@ func formatRateBps(rateBytes uint64) string {
 	if bits%1000 == 0 {
 		return fmt.Sprintf("%dkbit", bits/1000)
 	}
-	return fmt.Sprintf("%dbps", bits)
+	return fmt.Sprintf("%dbps", rateBytes)
 }
 
 // InspectNodeAlignment checks if the kernel TC state matches the aggregated planned CRD specs.
@@ -45,19 +45,16 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 		DriftDeltas: make([]networkingv1alpha1.ConfigDriftDelta, 0),
 	}
 
-	// Initialize slices to ensure clean JSON arrays ([]) rather than null values
 	report.Actual.Classes = make([]networkingv1alpha1.ClassSpec, 0)
 	report.Actual.IngressFilters = make([]networkingv1alpha1.FilterMeta, 0)
 
-	// Resolve dynamic root handle ID (e.g. htbId: 6 -> handle 6:0)
 	rootHandle := desired.HtbID
 	if rootHandle <= 0 {
 		rootHandle = 1
 	}
 	expectedRootHandle := netlink.MakeHandle(uint16(rootHandle), 0)
 
-	// Resolve target network link via Netlink
-	link, err := netlink.LinkByName(desired.Interface)
+	physLink, err := netlink.LinkByName(desired.Interface)
 	if err != nil {
 		report.IsAligned = false
 		report.DriftDeltas = append(report.DriftDeltas, networkingv1alpha1.ConfigDriftDelta{
@@ -66,38 +63,69 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 			Expected:     "present on host",
 			Actual:       "missing device",
 		})
-
-		for _, plannedCls := range desired.Classes {
-			classHandle := plannedCls.GetClassID(desired.HtbID)
-			report.DriftDeltas = append(report.DriftDeltas, networkingv1alpha1.ConfigDriftDelta{
-				TargetHandle: fmt.Sprintf("class %s", classHandle),
-				Property:     "existence",
-				Expected:     "configured",
-				Actual:       fmt.Sprintf("missing (interface %s absent)", desired.Interface),
-			})
-		}
 		return report, nil
 	}
 
-	// 1. Inspect Attached Qdiscs (Root HTB & Ingress) using dynamic rootHandle
-	qdiscs, err := netlink.QdiscList(link)
+	ifbDevName := fmt.Sprintf("ifb-%s", desired.Interface)
+	if len(ifbDevName) > 15 {
+		ifbDevName = ifbDevName[:15]
+	}
+
+	ifbLink, errIfb := netlink.LinkByName(ifbDevName)
+
+	// 1. Inspect Qdiscs on Physical Link and detect active redirect filter
+	hasRedirectFilter := false
+	clsactIngressHandle := netlink.MakeHandle(0xffff, 2)
+	handlesToScan := []uint32{netlink.HANDLE_INGRESS, netlink.HANDLE_MIN_INGRESS, clsactIngressHandle, netlink.HANDLE_ROOT, expectedRootHandle}
+
+	qdiscs, err := netlink.QdiscList(physLink)
 	if err == nil {
 		for _, q := range qdiscs {
 			if q.Type() == "htb" && q.Attrs().Handle == expectedRootHandle {
 				report.Actual.HtbQdiscPresent = true
 			}
-			if q.Type() == "ingress" {
+			if q.Type() == "clsact" || q.Type() == "ingress" {
+				report.Actual.ClsactPresent = true
 				report.Actual.IngressPresent = true
 			}
 		}
 	}
 
-	// Helper map to quickly locate desired specs by Class ID
+	// Check if a matchall mirred redirect filter is attached to physical link
+	for _, h := range handlesToScan {
+		filters, err := netlink.FilterList(physLink, h)
+		if err != nil {
+			continue
+		}
+		for _, f := range filters {
+			if f.Type() == "matchall" {
+				hasRedirectFilter = true
+				break
+			}
+		}
+		if hasRedirectFilter {
+			break
+		}
+	}
+
+	isIfbActive := errIfb == nil && ifbLink != nil && hasRedirectFilter
+
+	if isIfbActive {
+		report.Actual.IfbInterface = ifbDevName
+		ifbQdiscs, err := netlink.QdiscList(ifbLink)
+		if err == nil {
+			for _, q := range ifbQdiscs {
+				if q.Type() == "htb" {
+					report.Actual.HtbQdiscPresent = true
+				}
+			}
+		}
+	}
+
 	desiredClassMap := make(map[string]networkingv1alpha1.ClassSpec)
-	// Helper map to locate desired specs by Priority / Preference
 	desiredPrioMap := make(map[uint16]networkingv1alpha1.ClassSpec)
 
-	for _, cls := range desired.Classes {
+	for idx, cls := range desired.Classes {
 		handle := cls.GetClassID(rootHandle)
 		desiredClassMap[handle] = cls
 
@@ -105,163 +133,206 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, targetClassID
 		if prioVal <= 0 {
 			prioVal = cls.ClassMinor
 		}
-		if prioVal > 0 {
-			desiredPrioMap[uint16(prioVal)] = cls
+		if prioVal <= 0 {
+			prioVal = idx + 1
 		}
+		desiredPrioMap[uint16(prioVal)] = cls
 	}
 
-	// 2. Inspect Actual Live Netlink Egress Classes using dynamic rootHandle
-	liveClasses := make(map[string]*netlink.HtbClass)
-	classes, err := netlink.ClassList(link, expectedRootHandle)
-	if err == nil {
+	// 2. Inspect HTB Classes
+	classSpecsMap := make(map[string]*networkingv1alpha1.ClassSpec)
+
+	if classes, err := netlink.ClassList(physLink, expectedRootHandle); err == nil {
 		for _, c := range classes {
 			if htb, ok := c.(*netlink.HtbClass); ok {
 				classID := netlink.HandleStr(htb.Attrs().Handle)
-				liveClasses[classID] = htb
-
-				liveRate := formatRateBps(htb.Rate)
-				liveCeil := formatRateBps(htb.Ceil)
-
-				actualCls := networkingv1alpha1.ClassSpec{
+				if classID == fmt.Sprintf("%d:1", rootHandle) {
+					continue
+				}
+				spec := &networkingv1alpha1.ClassSpec{
 					ClassID:    classID,
 					Priority:   int(htb.Prio),
-					EgressRate: liveRate,
-					EgressCeil: liveCeil,
+					EgressRate: formatRateBps(htb.Rate),
+					EgressCeil: formatRateBps(htb.Ceil),
 				}
-
-				if desSpec, matched := desiredClassMap[classID]; matched {
-					actualCls.Name = desSpec.Name
-					actualCls.MatchType = desSpec.MatchType
-					actualCls.VlanID = desSpec.VlanID
-					actualCls.Subnet = desSpec.Subnet
-					actualCls.Mark = desSpec.Mark
-
-					if actualCls.EgressRate == "" {
-						actualCls.EgressRate = desSpec.EgressRate
-					}
-					if actualCls.EgressCeil == "" {
-						actualCls.EgressCeil = desSpec.EgressCeil
-					}
-				}
-
-				report.Actual.Classes = append(report.Actual.Classes, actualCls)
+				classSpecsMap[classID] = spec
 			}
 		}
 	}
 
-	// 3. Validate Planned Egress Classes Against Kernel Netlink State
-	for _, plannedCls := range desired.Classes {
-		classHandle := plannedCls.GetClassID(rootHandle)
-
-		if targetClassID != "" && classHandle != targetClassID {
-			continue
-		}
-
-		actualHtb, exists := liveClasses[classHandle]
-		if !exists {
-			report.IsAligned = false
-			report.DriftDeltas = append(report.DriftDeltas, networkingv1alpha1.ConfigDriftDelta{
-				TargetHandle: fmt.Sprintf("class %s", classHandle),
-				Property:     "existence",
-				Expected:     "configured",
-				Actual:       "missing",
-			})
-			continue
-		}
-
-		if plannedCls.Priority > 0 && int(actualHtb.Prio) != plannedCls.Priority {
-			report.IsAligned = false
-			report.DriftDeltas = append(report.DriftDeltas, networkingv1alpha1.ConfigDriftDelta{
-				TargetHandle: fmt.Sprintf("class %s", classHandle),
-				Property:     "priority",
-				Expected:     fmt.Sprintf("%d", plannedCls.Priority),
-				Actual:       fmt.Sprintf("%d", actualHtb.Prio),
-			})
+	if isIfbActive {
+		if classes, err := netlink.ClassList(ifbLink, expectedRootHandle); err == nil {
+			for _, c := range classes {
+				if htb, ok := c.(*netlink.HtbClass); ok {
+					classID := netlink.HandleStr(htb.Attrs().Handle)
+					if classID == fmt.Sprintf("%d:1", rootHandle) {
+						continue
+					}
+					existing, found := classSpecsMap[classID]
+					if !found {
+						existing = &networkingv1alpha1.ClassSpec{ClassID: classID, Priority: int(htb.Prio)}
+						classSpecsMap[classID] = existing
+					}
+					existing.IngressRate = formatRateBps(htb.Rate)
+					existing.IngressCeil = formatRateBps(htb.Ceil)
+				}
+			}
 		}
 	}
 
-	// 4. Inspect & Validate Ingress Policing Filters Across ALL Filter Types (Flower & FW)
-	filters, err := netlink.FilterList(link, netlink.HANDLE_INGRESS)
-	liveFilters := make(map[uint16]bool)
-	if err == nil {
-		for _, f := range filters {
-			attrs := f.Attrs()
-			if attrs == nil {
+	for classID, spec := range classSpecsMap {
+		if desSpec, matched := desiredClassMap[classID]; matched {
+			spec.Name = desSpec.Name
+			spec.MatchType = desSpec.MatchType
+			spec.VlanID = desSpec.VlanID
+			spec.Subnet = desSpec.Subnet
+			spec.Mark = desSpec.Mark
+			spec.EgressBurst = desSpec.EgressBurst
+			spec.EnableFqCodel = desSpec.EnableFqCodel
+			spec.IngressBurst = desSpec.IngressBurst
+			spec.IngressAction = desSpec.IngressAction
+
+			if spec.EgressRate == "" {
+				spec.EgressRate = desSpec.EgressRate
+			}
+			if spec.EgressCeil == "" {
+				spec.EgressCeil = desSpec.EgressCeil
+			}
+			if spec.IngressRate == "" {
+				spec.IngressRate = desSpec.IngressRate
+			}
+			if spec.IngressCeil == "" {
+				spec.IngressCeil = desSpec.IngressCeil
+			}
+		}
+		if spec.Name == "" && (classID == "1:99" || classID == fmt.Sprintf("%d:99", rootHandle)) {
+			spec.Name = "default-fallback"
+		}
+		report.Actual.Classes = append(report.Actual.Classes, *spec)
+	}
+
+	// 3. Inspect Filters
+	linksToScan := []netlink.Link{physLink}
+	if isIfbActive {
+		linksToScan = append(linksToScan, ifbLink)
+	}
+
+	seenFilters := make(map[string]bool)
+
+	for _, scanLink := range linksToScan {
+		isVirtual := scanLink.Attrs().Name == ifbDevName
+		scanIfaceName := scanLink.Attrs().Name
+
+		for _, h := range handlesToScan {
+			filters, err := netlink.FilterList(scanLink, h)
+			if err != nil {
 				continue
 			}
 
-			liveFilters[attrs.Priority] = true
-
-			var chainVal uint32
-			if attrs.Chain != nil {
-				chainVal = *attrs.Chain
-			}
-
-			meta := networkingv1alpha1.FilterMeta{
-				Priority: attrs.Priority,
-				Handle:   attrs.Handle,
-				Chain:    chainVal,
-				Type:     f.Type(),
-				Protocol: attrs.Protocol,
-				Action:   "police drop",
-				Matches:  make(map[string]string),
-			}
-
-			// Map Flower Classifier
-			if flower, ok := f.(*netlink.Flower); ok {
-				if flower.VlanId != 0 {
-					meta.Matches["vlan_id"] = fmt.Sprintf("%d", flower.VlanId)
-					meta.Matches["eth_type"] = fmt.Sprintf("0x%x", flower.EthType)
+			for _, f := range filters {
+				attrs := f.Attrs()
+				if attrs == nil {
+					continue
 				}
-			}
 
-			// Map FW Classifier (handle = mark)
-			if f.Type() == "fw" {
-				meta.Type = "fw"
-				meta.MatchType = "mark"
-				meta.Mark = uint32(attrs.Handle)
-				meta.Matches["mark"] = fmt.Sprintf("%d", attrs.Handle)
-			}
+				dedupKey := fmt.Sprintf("%s-%d-%d-%d", scanIfaceName, attrs.Priority, attrs.Handle, attrs.Protocol)
+				if seenFilters[dedupKey] {
+					continue
+				}
+				seenFilters[dedupKey] = true
 
-			// Enrich with matching 1:1 class metadata & action
-			if desSpec, matched := desiredPrioMap[attrs.Priority]; matched {
-				meta.Name = desSpec.Name
-				meta.MatchType = desSpec.MatchType
-				meta.VlanID = desSpec.VlanID
-				meta.Subnet = desSpec.Subnet
-				meta.Mark = desSpec.Mark
-				meta.IngressRate = desSpec.IngressRate
-				meta.IngressBurst = desSpec.IngressBurst
-				meta.Action = fmt.Sprintf("police %s", desSpec.GetIngressAction())
-			}
+				var chainVal uint32
+				if attrs.Chain != nil {
+					chainVal = *attrs.Chain
+				}
 
-			report.Actual.IngressFilters = append(report.Actual.IngressFilters, meta)
+				meta := networkingv1alpha1.FilterMeta{
+					Priority:  attrs.Priority,
+					Handle:    attrs.Handle,
+					Chain:     chainVal,
+					Interface: scanIfaceName,
+					Name:      scanIfaceName,
+					Type:      f.Type(),
+					Protocol:  attrs.Protocol,
+					Action:    "police drop",
+					Matches:   make(map[string]string),
+				}
+
+				if !isVirtual && hasRedirectFilter {
+					if f.Type() == "matchall" {
+						meta.Interface = desired.Interface
+						meta.Name = fmt.Sprintf("Ingress traffic %s", desired.Interface)
+						meta.Action = fmt.Sprintf("mirred redirect dev %s", ifbDevName)
+						report.Actual.IngressFilters = append(report.Actual.IngressFilters, meta)
+					}
+					continue
+				}
+
+				if isVirtual {
+					meta.Interface = ifbDevName
+					meta.Action = "htb classify"
+				}
+
+				if flower, ok := f.(*netlink.Flower); ok {
+					if flower.VlanId != 0 {
+						meta.VlanID = int(flower.VlanId)
+						meta.Matches["vlan_id"] = fmt.Sprintf("%d", flower.VlanId)
+						meta.Matches["eth_type"] = fmt.Sprintf("0x%x", flower.EthType)
+					}
+					if flower.DestIP != nil {
+						meta.Subnet = flower.DestIP.String()
+						meta.Matches["dst_ip"] = flower.DestIP.String()
+					}
+				}
+
+				if f.Type() == "fw" {
+					meta.Type = "fw"
+					meta.MatchType = "mark"
+					meta.Mark = uint32(attrs.Handle)
+					meta.Matches["mark"] = fmt.Sprintf("%d", attrs.Handle)
+				}
+
+				if desSpec, matched := desiredPrioMap[attrs.Priority]; matched {
+					if desSpec.Name != "" {
+						meta.Name = desSpec.Name
+					}
+					meta.MatchType = desSpec.MatchType
+					if meta.VlanID == 0 {
+						meta.VlanID = desSpec.VlanID
+					}
+					if meta.Subnet == "" {
+						meta.Subnet = desSpec.Subnet
+					}
+					meta.Mark = desSpec.Mark
+					meta.IngressRate = desSpec.IngressRate
+					meta.IngressBurst = desSpec.IngressBurst
+
+					if !hasRedirectFilter {
+						actionStr := desSpec.GetIngressAction()
+						if actionStr == "" {
+							actionStr = "drop"
+						}
+						meta.Action = fmt.Sprintf("police %s", actionStr)
+					}
+				}
+
+				meta.Interface = scanIfaceName
+				report.Actual.IngressFilters = append(report.Actual.IngressFilters, meta)
+			}
 		}
 	}
 
-	for _, plannedCls := range desired.Classes {
-		if plannedCls.IngressRate == "" {
-			continue
+	// 4. POST-PROCESSING DEDUPLICATION PASS
+	// When IFB redirection is active, purge any physical interface filters that have a non-zero vlanId
+	if isIfbActive {
+		cleanFilters := make([]networkingv1alpha1.FilterMeta, 0, len(report.Actual.IngressFilters))
+		for _, filter := range report.Actual.IngressFilters {
+			if filter.Interface == desired.Interface && filter.VlanID > 0 {
+				continue // Strip physical interface per-VLAN filter entry
+			}
+			cleanFilters = append(cleanFilters, filter)
 		}
-
-		prioVal := plannedCls.Priority
-		if prioVal <= 0 {
-			prioVal = plannedCls.ClassMinor
-		}
-
-		if targetClassID != "" && plannedCls.GetClassID(rootHandle) != targetClassID {
-			continue
-		}
-
-		if !liveFilters[uint16(prioVal)] {
-			report.IsAligned = false
-			report.DriftDeltas = append(report.DriftDeltas, networkingv1alpha1.ConfigDriftDelta{
-				TargetHandle: fmt.Sprintf("ingress filter pref %d", prioVal),
-				Property:     "existence",
-				Expected:     "configured",
-				Actual:       "missing",
-			})
-		}
+		report.Actual.IngressFilters = cleanFilters
 	}
 
 	return report, nil

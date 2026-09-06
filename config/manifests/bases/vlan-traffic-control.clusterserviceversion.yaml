@@ -4,11 +4,12 @@ metadata:
   annotations:
     alm-examples: '[]'
     capabilities: Basic Install
+    categories: Networking, Community
     description: "The VLAN Traffic Control Operator manages eBPF/TC flower ingress policing \nand HTB egress bandwidth shaping per VLAN directly on OpenShift worker nodes.\n"
     operatorframework.io/suggested-namespace: openshift-vlan-tc-operator
     operators.operatorframework.io/builder: operator-sdk-v1.42.3
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
-  name: vlan-traffic-control.v0.2.32
+  name: vlan-traffic-control.v0.3.57
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -18,6 +19,12 @@ spec:
       displayName: VLAN Traffic Control
       kind: VlanTrafficControl
       name: vlantrafficcontrols.networking.med.io
+      specDescriptors: []
+      version: v1alpha1
+    - description: Status and metrics projection for individual VLAN traffic control classes across cluster nodes.
+      displayName: VlanTrafficControlClass
+      kind: VlanTrafficControlClass
+      name: vlantrafficcontrolsclasses.networking.med.io
       specDescriptors: []
       version: v1alpha1
   description: Advanced VLAN ingress policing and egress HTB traffic control operator for OpenShift.
@@ -75,6 +82,9 @@ spec:
           - vlantrafficcontrols
           - vlantrafficcontrols/status
           - vlantrafficcontrols/finalizers
+          - vlantrafficcontrolsclasses
+          - vlantrafficcontrolsclasses/status
+          - vlantrafficcontrolsclasses/finalizers
           verbs:
           - '*'
         - apiGroups:
@@ -104,10 +114,10 @@ spec:
   - name: Vlan Traffic Control
     url: https://github.com/rbruzzon73/vlan-traffic-control-operator
   maintainers:
-  - email: rbruzzon73@github.com
-    name: rbruzzon73
+  - email: rbruzzon@redhat.com
+    name: rbruzzon
   maturity: alpha
   provider:
     name: rbruzzon73
     url: https://github.com/rbruzzon73
-  version: 0.2.32
+  version: 0.3.57

@@ -1,121 +1,25 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
+OLD_VERSION="${1}"
+NEW_VERSION="${2}"
+
+if [ -z "$OLD_VERSION" ] || [ -z "$NEW_VERSION" ]; then
+  echo "Usage: $0 <OLD_VERSION> <NEW_VERSION>"
+  echo "Example: $0 0.2.63 0.2.64"
+  exit 1
+fi
+
 REGISTRY="ghcr.io/rbruzzon73"
-BASE_CSV="config/manifests/bases/vlan-traffic-control.clusterserviceversion.yaml"
-CLEAN_BASE64_ICON="PHN2ZyBpZD0iTGF5ZXJfMSIgZGF0YS1uYW1lPSJMYXllciAxIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxOTIgMTQ1Ij48ZGVmcz48c3R5bGU+LmNscy0xe2ZpbGw6I2UwMDt9PC9zdHlsZT48L2RlZnM+PHRpdGxlPlJlZEhhdC1Mb2dvLUhhdC1Db2xvcjwvdGl0bGU+PHBhdGggZD0iTTE1Ny43Nyw2Mi42MWExNCwxNCwwLDAsMSwuMzEsMy40MmMwLDE0Ljg4LTE4LjEsMTcuNDYtMzAuNjEsMTcuNDZDNzguODMsODMuNDksNDIuNTMsNTMuMjYsNDIuNTMsNDRhNi40Myw2LjQzLDAsMCwxLC4yMi0xLjk0bC0zLjY2LDkuMDZhMTguNDUsMTguNDUsMCwwLDAtMS41MSw3LjMzYzAsMTguMTEsNDEsNDUuNDgsODcuNzQsNDUuNDgsMjAuNjksMCwzNi40My03Ljc2LDM2LjQzLTIxLjc3LDAtMS4wOCwwLTEuOTQtMS43My0xMC4xM1oiLz48cGF0aCBjbGFzcz0iY2xzLTEiIGQ9Ik0xMjcuNDcsODMuNDljMTIuNTEsMCwzMC42MS0yLjU4LDMwLjYxLTE3LjQ2YTE0LDE0LDAsMCwwLS4zMS0zLjQybC03LjQ1LTMyLjM2Yy0xLjcyLTcuMTItMy4yMy0xMC4zNS0xNS43My0xNi42QzEyNC44OSw4LjY5LDEwMy43Ni41LDk3LjUxLjUsOTEuNjkuNSw5MCw4LDgzLjA2LDhjLTYuNjgsMC0xMS42NC01LjYtMTcuODktNS42LTYsMC05LjkxLDQuMDktMTIuOTMsMTIuNSwwLDAtOC40MSwyMy43Mi05LjQ5LDI3LjE2QTYuNDMsNi40MywwLDAsMCw0Mi41Myw0NGMwLDkuMjIsMzYuMywzOS40NSw4NC45NCwzOS40NU0xNjAsNzIuMDdjMS43Myw4LjE5LDEuNzMsOS4wNSwxLjczLDEwLjEzLDAsMTQtMTUuNzQsMjEuNzctMzYuNDMsMjEuNzdDNzguNTQsMTA0LDM3LjU4LDc2LjYsMzcuNTgsNTguNDlhMTguNDUsMTguNDUsMCwwLDEsMS41MS03LjMzQzIyLjI3LDUyLC41LDU1LC41LDc0LjIyYzAsMzEuNDgsNzQuNTksNzAuMjgsMTMzLjY1LDcwLjI4LDQ1LjI4LDAsNTYuNy0yMC40OCw1Ni43LTM2LjY1LDAtMTIuNzAtMTEtMjcuMTYtMzAuODMtMzUuNzgiLz48L3N2Zz4="
-
-show_help() {
-  cat << EOF
-Usage: $0 [OLD_VERSION] [NEW_VERSION]
-
-Options:
-  -h, --help    Show this help message and exit.
-
-Supported Usage Scenarios:
-  1. $0
-     Auto-detects the current version from ${BASE_CSV} and increments the patch version by 1.
-     Example: If current version is 0.3.17, target version becomes 0.3.18.
-
-  2. $0 <NEW_VERSION>
-     Auto-detects the current version and builds toward <NEW_VERSION>.
-     Example: $0 0.3.18
-
-  3. $0 <OLD_VERSION> <NEW_VERSION>
-     Forces starting from <OLD_VERSION> to build target <NEW_VERSION>.
-     Example: $0 0.3.16 0.3.18
-
-EOF
-  exit 0
-}
-
-if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
-  show_help
-fi
-
-# Helper: Extract current version from Base CSV or bundle CSV
-get_current_version() {
-  if [ -f "$BASE_CSV" ]; then
-    # Strategy 1: Match metadata.name (e.g., vlan-traffic-control.v0.3.17)
-    VER=$(grep -E "name:\s*vlan-traffic-control\.v[0-9]+\.[0-9]+\.[0-9]+" "$BASE_CSV" | head -n 1 | sed -E 's/.*\.v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
-    if [ -n "$VER" ]; then
-      echo "$VER"
-      return 0
-    fi
-
-    # Strategy 2: Match spec.version field (e.g., version: 0.3.17)
-    VER=$(grep -E "^\s*version:\s*\"?[0-9]+\.[0-9]+\.[0-9]+" "$BASE_CSV" | head -n 1 | awk '{print $2}' | tr -d '"' | tr -d "'")
-    if [ -n "$VER" ]; then
-      echo "$VER"
-      return 0
-    fi
-  fi
-
-  # Strategy 3: Fallback to bundle CSV if base CSV version is missing
-  BUNDLE_CSV="bundle/manifests/vlan-traffic-control.clusterserviceversion.yaml"
-  if [ -f "$BUNDLE_CSV" ]; then
-    VER=$(grep -E "name:\s*vlan-traffic-control\.v[0-9]+\.[0-9]+\.[0-9]+" "$BUNDLE_CSV" | head -n 1 | sed -E 's/.*\.v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
-    if [ -n "$VER" ]; then
-      echo "$VER"
-      return 0
-    fi
-  fi
-
-  echo ""
-}
-
-# Parse input parameters
-if [ "$#" -eq 0 ]; then
-  CURRENT_VER=$(get_current_version)
-  if [ -z "$CURRENT_VER" ]; then
-    echo "❌ Error: Could not auto-detect current version from ${BASE_CSV}."
-    exit 1
-  fi
-  OLD_VERSION="${CURRENT_VER}"
-  # Increment patch digit (e.g. 0.3.17 -> 0.3.18)
-  NEW_VERSION=$(echo "${OLD_VERSION}" | awk -F. '{$NF = $NF + 1; print $1"."$2"."$3}')
-elif [ "$#" -eq 1 ]; then
-  CURRENT_VER=$(get_current_version)
-  if [ -z "$CURRENT_VER" ]; then
-    echo "❌ Error: Could not auto-detect current version from ${BASE_CSV}."
-    exit 1
-  fi
-  OLD_VERSION="${CURRENT_VER}"
-  NEW_VERSION="${1}"
-elif [ "$#" -eq 2 ]; then
-  OLD_VERSION="${1}"
-  NEW_VERSION="${2}"
-else
-  echo "❌ Invalid arguments."
-  show_help
-fi
-
-# Strip 'v' prefix if user passed v0.3.18
-OLD_VERSION="${OLD_VERSION#v}"
-NEW_VERSION="${NEW_VERSION#v}"
-
 NEW_TAG="v${NEW_VERSION}"
+BASE_CSV="config/manifests/bases/vlan-traffic-control.clusterserviceversion.yaml"
+
+# Corrected Red Hat Base64 SVG string
+CLEAN_BASE64_ICON="PHN2ZyBpZD0iTGF5ZXJfMSIgZGF0YS1uYW1lPSJMYXllciAxIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxOTIgMTQ1Ij48ZGVmcz48c3R5bGU+LmNscy0xe2ZpbGw6I2UwMDt9PC9zdHlsZT48L2RlZnM+PHRpdGxlPlJlZEhhdC1Mb2dvLUhhdC1Db2xvcjwvdGl0bGU+PHBhdGggZD0iTTE1Ny43Nyw2Mi42MWExNCwxNCwwLDAsMSwuMzEsMy40MmMwLDE0Ljg4LTE4LjEsMTcuNDYtMzAuNjEsMTcuNDZDNzguODMsODMuNDksNDIuNTMsNTMuMjYsNDIuNTMsNDRhNi40Myw2LjQzLDAsMCwxLC4yMi0xLjk0bC0zLjY2LDkuMDZhMTguNDUsMTguNDUsMCwwLDAtMS41MSw3LjMzYzAsMTguMTEsNDEsNDUuNDgsODcuNzQsNDUuNDgsMjAuNjksMCwzNi40My03Ljc2LDM2LjQzLTIxLjc3LDAtMS4wOCwwLTEuOTQtMS43My0xMC4xM1oiLz48cGF0aCBjbGFzcz0iY2xzLTEiIGQ9Ik0xMjcuNDcsODMuNDljMTIuNTEsMCwzMC42MS0yLjU4LDMwLjYxLTE3LjQ2YTE0LDE0LDAsMCwwLS4zMS0zLjQybC03LjQ1LTMyLjM2Yy0xLjcyLTcuMTItMy4yMy0xMC4zNS0xNS43My0xNi42QzEyNC44OSw4LjY5LDEwMy43Ni41LDk3LjUxLjUsOTEuNjkuNSw5MCw4LDgzLjA2LDhjLTYuNjgsMC0xMS42NC01LjYtMTcuODktNS42LTYsMC05LjkxLDQuMDktMTIuOTMsMTIuNSwwLDAtOC40MSwyMy43Mi05LjQ5LDI3LjE2QTYuNDMsNi40MywwLDAsMCw0Mi41Myw0NGMwLDkuMjIsMzYuMywzOS40NSw4NC45NCwzOS40NU0xNjAsNzIuMDdjMS43Myw4LjE5LDEuNzMsOS4wNSwxLjczLDEwLjEzLDAsMTQtMTUuNzQsMjEuNzctMzYuNDMsMjEuNzdDNzguNTQsMTA0LDM3LjU4LDc2LjYsMzcuNTgsNTguNDlhMTguNDUsMTguNDUsMCwwLDEsMS41MS03LjMzQzIyLjI3LDUyLC41LDU1LC41LDc0LjIyYzAsMzEuNDgsNzQuNTksNzAuMjgsMTMzLjY1LDcwLjI4LDQ1LjI4LDAsNTYuNy0yMC40OCw1Ni43LTM2LjY1LDAtMTIuNzAtMTEtMjcuMTYtMzAuODMtMzUuNzgiLz48L3N2Zz4="
 
 echo "=================================================="
 echo "==> Starting release workflow: v${OLD_VERSION} -> v${NEW_VERSION}"
 echo "=================================================="
-
-# ------------------------------------------------------------------------------
-# 0. Code Generation, Formatting, Linting & Build Verification
-# ------------------------------------------------------------------------------
-echo "==> Step 0: Running API generation, code formatting & compilation checks..."
-make generate
-make manifests
-
-echo "--> Formatting Go code..."
-go fmt ./...
-
-echo "--> Running go vet linter..."
-go vet ./...
-
-echo "--> Testing Go manager compilation..."
-go build -o /dev/null ./cmd/manager/main.go
-echo "✓ Manager compilation successful."
 
 # ------------------------------------------------------------------------------
 # 1. Update version references across the project via bump script & sed
@@ -128,8 +32,8 @@ find config/ -type f \( -name "*.yaml" -o -name "*.yml" \) -exec sed -i "s|${REG
 find config/ -type f \( -name "*.yaml" -o -name "*.yml" \) -exec sed -i "s|${REGISTRY}/vlan-traffic-control-operator:v[0-9]*\.[0-9]*\.[0-9]*|${REGISTRY}/vlan-traffic-control-operator:${NEW_TAG}|g" {} +
 
 # Update fallback defaults in Go files if present
-find pkg/ controllers/ cmd/ -type f -name "*.go" -exec sed -i "s|vlan-traffic-control-agent:v[0-9]*\.[0-9]*\.[0-9]*|vlan-traffic-control-agent:${NEW_TAG}|g" {} + 2>/dev/null || true
-find pkg/ controllers/ cmd/ -type f -name "*.go" -exec sed -i "s|vlan-traffic-control-operator:v[0-9]*\.[0-9]*\.[0-9]*|vlan-traffic-control-operator:${NEW_TAG}|g" {} + 2>/dev/null || true
+find pkg/ controllers/ -type f -name "*.go" -exec sed -i "s|vlan-traffic-control-agent:v[0-9]*\.[0-9]*\.[0-9]*|vlan-traffic-control-agent:${NEW_TAG}|g" {} + 2>/dev/null || true
+find pkg/ controllers/ -type f -name "*.go" -exec sed -i "s|vlan-traffic-control-operator:v[0-9]*\.[0-9]*\.[0-9]*|vlan-traffic-control-operator:${NEW_TAG}|g" {} + 2>/dev/null || true
 
 # ------------------------------------------------------------------------------
 # 1c. Sanitize & Ensure Base CSV Icon String BEFORE builds start
@@ -265,14 +169,17 @@ with open('$CSV_FILE', 'w') as f:
 # 4. Build and Push Controller & Bundle Containers
 # ------------------------------------------------------------------------------
 echo "==> Step 4: Building & pushing operator controller image..."
+#podman build --no-cache -t "${REGISTRY}/vlan-traffic-control-operator:${NEW_TAG}" -f Dockerfile .
 podman build -t "${REGISTRY}/vlan-traffic-control-operator:${NEW_TAG}" -f Dockerfile .
 podman push "${REGISTRY}/vlan-traffic-control-operator:${NEW_TAG}"
 
 echo "==> Step 4b: Building & pushing agent image..."
+#podman build --no-cache -t "${REGISTRY}/vlan-traffic-control-agent:${NEW_TAG}" -f Dockerfile.agent .
 podman build -t "${REGISTRY}/vlan-traffic-control-agent:${NEW_TAG}" -f Dockerfile.agent .
 podman push "${REGISTRY}/vlan-traffic-control-agent:${NEW_TAG}"
 
 echo "==> Step 5: Building & pushing OLM bundle image..."
+#podman build --no-cache -t "${REGISTRY}/vlan-traffic-control-bundle:${NEW_TAG}" -f bundle.Dockerfile .
 podman build -t "${REGISTRY}/vlan-traffic-control-bundle:${NEW_TAG}" -f bundle.Dockerfile .
 podman push "${REGISTRY}/vlan-traffic-control-bundle:${NEW_TAG}"
 
@@ -382,6 +289,7 @@ else:
 opm generate dockerfile catalog
 
 echo "--> Building catalog container image..."
+#podman build --no-cache -t "${REGISTRY}/vlan-traffic-control-catalog:${NEW_TAG}" -f catalog.Dockerfile .
 podman build -t "${REGISTRY}/vlan-traffic-control-catalog:${NEW_TAG}" -f catalog.Dockerfile .
 podman push "${REGISTRY}/vlan-traffic-control-catalog:${NEW_TAG}"
 

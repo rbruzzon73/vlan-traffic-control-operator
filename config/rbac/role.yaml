@@ -36,7 +36,9 @@ rules:
 - apiGroups:
   - networking.med.io
   resources:
+  - vlantrafficcontrolclasses
   - vlantrafficcontrols
+  - vlantrafficcontrolsclasses
   verbs:
   - create
   - delete
@@ -48,16 +50,18 @@ rules:
 - apiGroups:
   - networking.med.io
   resources:
-  - vlantrafficcontrols/finalizers
+  - vlantrafficcontrolclasses/status
+  - vlantrafficcontrols/status
+  - vlantrafficcontrolsclasses/status
   verbs:
+  - get
+  - patch
   - update
 - apiGroups:
   - networking.med.io
   resources:
-  - vlantrafficcontrols/status
+  - vlantrafficcontrols/finalizers
   verbs:
-  - get
-  - patch
   - update
 - apiGroups:
   - security.openshift.io

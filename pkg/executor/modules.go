@@ -16,17 +16,22 @@ func EnsureKernelModulesLoaded(strategy string, log logr.Logger) error {
 	switch strategy {
 	case "flower":
 		modules = append(modules, "cls_flower")
-	case "u32", "auto":
+	case "u32", "auto", "ifb":
 		modules = append(modules, "cls_u32", "cls_flower")
 	}
 
 	for _, mod := range modules {
 		if !isModuleLoaded(mod) {
 			log.Info("Kernel module not loaded. Attempting modprobe", "module", mod)
-			if err := loadModule(mod); err != nil {
+			// Pass numtxqs=16 specifically when loading the ifb module
+			var opts []string
+			if mod == "ifb" {
+				opts = append(opts, "numtxqs=16")
+			}
+			if err := loadModule(mod, opts...); err != nil {
 				return fmt.Errorf("failed to load required kernel module %s: %w", mod, err)
 			}
-			log.Info("Successfully loaded kernel module", "module", mod)
+			log.Info("Successfully loaded kernel module", "module", mod, "options", opts)
 		} else {
 			log.V(1).Info("Kernel module already loaded", "module", mod)
 		}
@@ -54,11 +59,11 @@ func isModuleLoaded(mod string) bool {
 	return false
 }
 
-func loadModule(mod string) error {
+func loadModule(mod string, params ...string) error {
 	var errs []string
 
-	// Attempt 1: Explicit absolute path inside chroot context (/usr/sbin/modprobe)
-	cmdChrootAbs := exec.Command("/host/usr/sbin/chroot", "/host", "/usr/sbin/modprobe", mod)
+	argsAbs := append([]string{"/host", "/usr/sbin/modprobe", mod}, params...)
+	cmdChrootAbs := exec.Command("/host/usr/sbin/chroot", argsAbs...)
 	var stderrChrootAbs bytes.Buffer
 	cmdChrootAbs.Stderr = &stderrChrootAbs
 	if err := cmdChrootAbs.Run(); err == nil {
@@ -66,8 +71,8 @@ func loadModule(mod string) error {
 	}
 	errs = append(errs, fmt.Sprintf("chroot /usr/sbin/modprobe failed: %s", strings.TrimSpace(stderrChrootAbs.String())))
 
-	// Attempt 2: Alternative RHCOS path (/sbin/modprobe)
-	cmdChrootSbin := exec.Command("/host/usr/sbin/chroot", "/host", "/sbin/modprobe", mod)
+	argsSbin := append([]string{"/host", "/sbin/modprobe", mod}, params...)
+	cmdChrootSbin := exec.Command("/host/usr/sbin/chroot", argsSbin...)
 	var stderrChrootSbin bytes.Buffer
 	cmdChrootSbin.Stderr = &stderrChrootSbin
 	if err := cmdChrootSbin.Run(); err == nil {

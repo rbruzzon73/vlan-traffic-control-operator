@@ -1,5 +1,19 @@
 # VLAN Traffic Control Operator - Solution Overview & Technical Architecture 
 
+---
+
+### ⚠️ Architecture Document Status: In Review
+*The architecture specification is undergoing updates following the implementation of:*
+
+- **Dual Traffic Control Strategies**
+  - Stateless Flower Policing (`tcStrategy: flower`)
+  - Stateful IFB Redirection (`tcStrategy: ifb`)
+- **Multi-CR Split Support**
+- **Parallel Reconciliation & Polling**
+- **Dual-Interface Telemetry Aggregation**
+
+---
+
 - **VLAN Traffic Control Operator** delivers fine-grained, declarative Quality of Service (QoS) and host-level network traffic shaping for OpenShift/Kubernetes clusters.
 
 - Standard Kubernetes bandwidth CNI plugins are often limited to basic pod-level ingress/egress rate limiting and fail to address non-pod traffic, secondary Multus interfaces, Open vSwitch (OVS) bridges, or hardware-stripped VLAN tags. 

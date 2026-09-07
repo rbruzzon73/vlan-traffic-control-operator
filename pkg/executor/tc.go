@@ -9,7 +9,6 @@ import (
 )
 
 // ResolveClassifier parses matching parameters for a class spec.
-// Signature: (proto string, flowerMatch []string, desc string, filterPrio int, err error)
 func ResolveClassifier(cls networkingv1alpha1.ClassSpec, defaultHtbID int) (string, []string, string, int, error) {
 	prio := cls.Priority
 	if prio <= 0 {
@@ -59,7 +58,7 @@ func ResolveClassifier(cls networkingv1alpha1.ClassSpec, defaultHtbID int) (stri
 	}
 }
 
-// ReconcileStatelessIngress configures tc flower ingress policing directly on the physical interface.
+// ReconcileStatelessIngress configures tc flower ingress policing directly on physical or bridge interfaces.
 func ReconcileStatelessIngress(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) error {
 	if spec == nil || spec.Interface == "" {
 		return nil
@@ -71,56 +70,65 @@ func ReconcileStatelessIngress(spec *networkingv1alpha1.HtbRootSpec, log logr.Lo
 	cmdQdisc := execHostCommand("tc", "qdisc", "add", "dev", iface, "handle", "ffff:", "ingress")
 	_ = cmdQdisc.Run()
 
-	// 2. Flush stale ingress filters
-	cmdFlush := execHostCommand("tc", "filter", "del", "dev", iface, "parent", "ffff:")
-	_ = cmdFlush.Run()
-
-	rootHtbID := spec.HtbID
-	if rootHtbID <= 0 {
-		rootHtbID = 1
-	}
-
-	// 3. Apply stateless ingress policing rules
+	// 2. Apply stateless ingress policing rules
 	for _, cls := range spec.Classes {
-		if cls.IngressRate == "" {
-			continue
-		}
-
 		prio := cls.Priority
 		if prio <= 0 {
 			prio = cls.ClassMinor
 		}
 
+		// IF INGRESS RATE IS NOT SET, EXPLICITLY PURGE INGRESS FILTER FOR THIS PRIORITY
+		if cls.IngressRate == "" {
+			cmdDel := execHostCommand("tc", "filter", "del", "dev", iface, "parent", "ffff:", "prio", fmt.Sprintf("%d", prio))
+			_ = cmdDel.Run()
+			continue
+		}
+
 		burst := cls.IngressBurst
 		if burst == "" {
-			burst = "50k"
+			burst = "16Mb"
 		}
 
 		action := cls.GetIngressAction()
 		if action == "" {
-			action = "drop"
+			action = "pass"
 		}
+
+		// Flush prior rule at this priority level before adding
+		cmdDel := execHostCommand("tc", "filter", "del", "dev", iface, "parent", "ffff:", "prio", fmt.Sprintf("%d", prio))
+		_ = cmdDel.Run()
 
 		var cmd *exec.Cmd
 		if cls.MatchType == "subnet" && cls.Subnet != "" {
-			cmd = execHostCommand("tc", "filter", "add", "dev", iface, "parent", "ffff:",
-				"protocol", "802.1Q", "prio", fmt.Sprintf("%d", prio), "flower",
-				"vlan_id", fmt.Sprintf("%d", cls.VlanID),
-				"vlan_ethtype", "ip",
-				"dst_ip", cls.Subnet,
-				"action", "police", "rate", cls.IngressRate, "burst", burst, "conform-exceed", fmt.Sprintf("ok/%s", action))
+			if cls.VlanID > 0 {
+				cmd = execHostCommand("tc", "filter", "add", "dev", iface, "parent", "ffff:",
+					"protocol", "802.1Q", "prio", fmt.Sprintf("%d", prio), "flower",
+					"vlan_id", fmt.Sprintf("%d", cls.VlanID),
+					"vlan_ethtype", "ip",
+					"dst_ip", cls.Subnet,
+					"action", "police", "rate", cls.IngressRate, "burst", burst, "conform-exceed", action)
+			} else {
+				cmd = execHostCommand("tc", "filter", "add", "dev", iface, "parent", "ffff:",
+					"protocol", "ip", "prio", fmt.Sprintf("%d", prio), "flower",
+					"dst_ip", cls.Subnet,
+					"action", "police", "rate", cls.IngressRate, "burst", burst, "conform-exceed", action)
+			}
 		} else if cls.VlanID > 0 {
 			cmd = execHostCommand("tc", "filter", "add", "dev", iface, "parent", "ffff:",
 				"protocol", "802.1Q", "prio", fmt.Sprintf("%d", prio), "flower",
 				"vlan_id", fmt.Sprintf("%d", cls.VlanID),
-				"action", "police", "rate", cls.IngressRate, "burst", burst, "conform-exceed", fmt.Sprintf("ok/%s", action))
+				"action", "police", "rate", cls.IngressRate, "burst", burst, "conform-exceed", action)
+		} else {
+			cmd = execHostCommand("tc", "filter", "add", "dev", iface, "parent", "ffff:",
+				"protocol", "all", "prio", fmt.Sprintf("%d", prio), "flower",
+				"action", "police", "rate", cls.IngressRate, "burst", burst, "conform-exceed", action)
 		}
 
 		if cmd != nil {
 			if out, err := cmd.CombinedOutput(); err != nil {
 				log.Error(err, "[STATELESS-INGRESS] Failed adding ingress policing filter", "interface", iface, "class", cls.Name, "output", string(out))
 			} else {
-				log.Info("✓ [STATELESS-INGRESS] Applied ingress policing rule", "interface", iface, "vlan", cls.VlanID, "rate", cls.IngressRate)
+				log.Info("✓ [STATELESS-INGRESS] Applied ingress policing rule", "interface", iface, "prio", prio, "rate", cls.IngressRate)
 			}
 		}
 	}

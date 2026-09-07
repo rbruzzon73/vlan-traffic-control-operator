@@ -1,0 +1,68 @@
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: flower-vlan-tc-egress
+  namespace: openshift-vlan-tc-operator
+spec:
+  tcStrategy: flower
+  reconcileIntervalSeconds: 60
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  htbRoot:
+    interface: enp1s0
+    rate: 10Gbit
+    htbId: 1
+    defaultClassId: "1:99"
+    defaultClassMinor: 99
+    classes:
+      - name: default-fallback
+        classId: "1:99"
+        priority: 0
+        egressRate: 10Gbit
+        enableFqCodel: false
+
+      - name: vlan-100-high-priority
+        classId: "1:100"
+        vlanId: 100
+        matchType: subnet
+        subnet: 10.0.100.0/24
+        priority: 1
+        egressRate: 2Gbit
+        egressBurst: 16Mb
+        enableFqCodel: false
+
+      - name: vlan-380-migration
+        classId: "1:380"
+        vlanId: 380
+        matchType: vlan
+        priority: 3
+        egressRate: 10Gbit
+        egressBurst: 256Mb
+        enableFqCodel: false
+---
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: flower-vlan-tc-ingress
+  namespace: openshift-vlan-tc-operator
+spec:
+  tcStrategy: flower
+  reconcileIntervalSeconds: 60
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  htbRoot:
+    interface: br-vlan380
+    rate: 10Gbit
+    htbId: 1
+    defaultClassId: "1:99"
+    defaultClassMinor: 99
+    classes:
+      - name: vlan-380-migration
+        classId: "1:380"
+        matchType: subnet
+        subnet: 10.0.238.0/24
+        priority: 3
+        ingressRate: 10Gbit
+        ingressBurst: 256Mb
+        ingressAction: pass
+        enableFqCodel: false

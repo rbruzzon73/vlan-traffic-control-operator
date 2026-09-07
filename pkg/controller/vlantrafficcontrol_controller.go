@@ -82,12 +82,28 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 			logger.Info("Performing finalizer cleanup for VlanTrafficControl", "name", instance.Name)
 
 			r.updateStatusWithRetry(ctx, req.NamespacedName, func(cr *v1alpha1.VlanTrafficControl) {
-				r.updateStatusCondition(cr, TypeReady, metav1.ConditionFalse, ReasonDeleting, "Cleaning up TC rules on target node agents")
+				r.updateStatusCondition(cr, TypeReady, metav1.ConditionFalse, ReasonDeleting, "Cleaning up TC rules and IFB virtual devices on target node agents")
 			})
 
+			// Synchronously trigger cleanup on active agent pods BEFORE removing finalizer
 			if err := r.cleanupNodeTrafficControl(ctx, &instance, targetNamespace); err != nil {
 				logger.Error(err, "Failed to clean up TC rules on node agents during CR deletion")
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, err
+			}
+
+			// Check remaining CR count BEFORE deleting the finalizer or DaemonSet
+			var crList v1alpha1.VlanTrafficControlList
+			isLastCR := false
+			if err := r.List(ctx, &crList); err == nil {
+				remainingCount := 0
+				for _, cr := range crList.Items {
+					if cr.Name != instance.Name {
+						remainingCount++
+					}
+				}
+				if remainingCount == 0 {
+					isLastCR = true
+				}
 			}
 
 			controllerutil.RemoveFinalizer(&instance, vlanTrafficControlFinalizer)
@@ -97,9 +113,9 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 			}
 			logger.Info("Successfully finalized VlanTrafficControl and updated node TC rules")
 
-			var crList v1alpha1.VlanTrafficControlList
-			if err := r.List(ctx, &crList); err == nil && len(crList.Items) <= 1 {
-				logger.Info("No remaining VlanTrafficControl CRs found - removing Agent DaemonSet")
+			// If this was the last remaining VTC resource, remove the Agent DaemonSet
+			if isLastCR {
+				logger.Info("No remaining VlanTrafficControl CRs found - deleting Agent DaemonSet")
 				var ds appsv1.DaemonSet
 				if err := r.Get(ctx, client.ObjectKey{Name: "vlan-traffic-control-agent", Namespace: targetNamespace}, &ds); err == nil {
 					_ = r.Delete(ctx, &ds)
@@ -428,7 +444,7 @@ func (r *VlanTrafficControlReconciler) cleanupNodeTrafficControl(ctx context.Con
 			if err == nil {
 				_ = resp.Body.Close()
 			}
-			logger.Info("Flushed interface on node (no remaining CRs target this node)", "node", agentPod.Spec.NodeName, "interface", instance.Spec.HtbRoot.Interface)
+			logger.Info("Flushed interface and deleted IFB device on node", "node", agentPod.Spec.NodeName, "interface", instance.Spec.HtbRoot.Interface)
 		}
 	}
 
@@ -439,7 +455,7 @@ func getAgentImage() string {
 	if img := os.Getenv("RELATED_IMAGE_AGENT"); img != "" {
 		return img
 	}
-	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.3.57"
+	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.3.83"
 }
 
 func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(

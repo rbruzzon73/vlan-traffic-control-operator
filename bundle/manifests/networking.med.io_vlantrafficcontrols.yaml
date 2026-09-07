@@ -36,6 +36,8 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
+        description: VlanTrafficControl is the Schema for the vlantrafficcontrols
+          API
         properties:
           apiVersion:
             description: |-
@@ -101,6 +103,13 @@ spec:
                           format: int32
                           type: integer
                         matchType:
+                          enum:
+                          - vlan
+                          - subnet
+                          - mark
+                          - ip
+                          - port
+                          - dscp
                           type: string
                         name:
                           type: string
@@ -187,10 +196,16 @@ spec:
                   type: string
                 type: object
               reconcileIntervalSeconds:
+                default: 60
                 type: integer
               tcStrategy:
                 description: TcStrategyType defines the TC filter execution strategy
                   (e.g. flower, u32, auto, ifb)
+                enum:
+                - ifb
+                - flower
+                - u32
+                - auto
                 type: string
               tolerations:
                 items:

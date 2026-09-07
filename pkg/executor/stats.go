@@ -2,6 +2,8 @@ package executor
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/vishvananda/netlink"
 	networkingv1alpha1 "networking.med.io/vlan-traffic-control/api/v1alpha1"
@@ -32,16 +34,46 @@ func GetInterfaceStats(iface string, desired *networkingv1alpha1.HtbRootSpec) (*
 	}
 	expectedRootHandle := netlink.MakeHandle(uint16(rootHandle), 0)
 
+	// Build Priority / Minor lookup map strictly scoped to the queried interface spec
 	prioToSpec := make(map[uint16]networkingv1alpha1.ClassSpec)
-	if desired != nil {
-		for idx, cls := range desired.Classes {
-			prio := uint16(cls.Priority)
-			if prio == 0 {
-				prio = uint16(idx + 1)
+	if desired != nil && (desired.Interface == "" || desired.Interface == iface) {
+		for _, cls := range desired.Classes {
+			if cls.Priority > 0 {
+				prioToSpec[uint16(cls.Priority)] = cls
 			}
-			prioToSpec[prio] = cls
+			if cls.ClassMinor > 0 {
+				prioToSpec[uint16(cls.ClassMinor)] = cls
+			}
+			if cls.ClassID != "" {
+				parts := strings.Split(cls.ClassID, ":")
+				if len(parts) == 2 {
+					if minor, err := strconv.Atoi(parts[1]); err == nil && minor > 0 {
+						prioToSpec[uint16(minor)] = cls
+					}
+				}
+			}
 		}
 	}
+
+	// Check if IFB redirection is actively running on physical link
+	hasRedirectFilter := false
+	handlesToScan := []uint32{netlink.HANDLE_INGRESS, netlink.HANDLE_MIN_INGRESS, netlink.MakeHandle(0xffff, 2), netlink.HANDLE_ROOT, expectedRootHandle}
+	for _, h := range handlesToScan {
+		filters, err := netlink.FilterList(link, h)
+		if err != nil {
+			continue
+		}
+		for _, f := range filters {
+			if f.Type() == "matchall" {
+				hasRedirectFilter = true
+				break
+			}
+		}
+		if hasRedirectFilter {
+			break
+		}
+	}
+	isIfbActive := ifbLink != nil && hasRedirectFilter
 
 	// 1. Collect HTB Egress Class Statistics on Physical Interface
 	if classes, err := netlink.ClassList(link, expectedRootHandle); err == nil {
@@ -91,7 +123,7 @@ func GetInterfaceStats(iface string, desired *networkingv1alpha1.HtbRootSpec) (*
 	}
 
 	// 2. Collect HTB Ingress Class Statistics on IFB Device (if active)
-	if ifbLink != nil {
+	if isIfbActive {
 		if ifbClasses, err := netlink.ClassList(ifbLink, expectedRootHandle); err == nil {
 			for _, c := range ifbClasses {
 				htb, ok := c.(*netlink.HtbClass)
@@ -136,13 +168,12 @@ func GetInterfaceStats(iface string, desired *networkingv1alpha1.HtbRootSpec) (*
 		}
 	}
 
-	// 3. Collect Ingress Filter Statistics (on physical link AND virtual IFB link)
+	// 3. Collect Ingress Filter Statistics
 	linksToScanStats := []netlink.Link{link}
-	if ifbLink != nil {
-		linksToScanStats = append(linksToScanStats, ifbLink)
+	if isIfbActive {
+		linksToScanStats = []netlink.Link{ifbLink}
 	}
 
-	handlesToScan := []uint32{netlink.HANDLE_INGRESS, netlink.HANDLE_MIN_INGRESS, netlink.MakeHandle(0xffff, 2), netlink.HANDLE_ROOT, expectedRootHandle}
 	seenStatsFilter := make(map[string]bool)
 
 	for _, scanL := range linksToScanStats {
@@ -196,6 +227,14 @@ func GetInterfaceStats(iface string, desired *networkingv1alpha1.HtbRootSpec) (*
 				if spec, found := prioToSpec[prio]; found {
 					iStat.ClassID = spec.GetClassID(int(rootHandle))
 					iStat.Subnet = spec.Subnet
+				} else if desired != nil {
+					for _, cls := range desired.Classes {
+						if cls.Priority == int(prio) || cls.ClassMinor == int(prio) {
+							iStat.ClassID = cls.GetClassID(int(rootHandle))
+							iStat.Subnet = cls.Subnet
+							break
+						}
+					}
 				}
 
 				stats.IngressStats = append(stats.IngressStats, iStat)

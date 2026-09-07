@@ -30,12 +30,19 @@ const (
 // TolerationSpec represents pod/CR policy scheduling tolerations.
 type TolerationSpec struct {
 	// +optional
+	// +kubebuilder:validation:Description="Taint key that the toleration applies to."
 	Key string `json:"key,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="Operator represents a key's relationship to the value. Valid operators are Exists and Equal."
 	Operator string `json:"operator,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="Taint value the toleration matches to."
 	Value string `json:"value,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="Effect indicates the taint effect to match (e.g. NoSchedule, PreferNoSchedule, NoExecute)."
 	Effect string `json:"effect,omitempty"`
 }
 
@@ -50,46 +57,83 @@ func (t TolerationSpec) ToCoreV1() corev1.Toleration {
 
 // ClassSpec defines individual HTB class configuration parameters.
 type ClassSpec struct {
-	Name       string `json:"name"`
-	ClassID    string `json:"classId,omitempty"`
-	ClassMinor int    `json:"classMinor,omitempty"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Description="Unique human-readable name for this traffic class rule (e.g., vlan-100-high-priority)."
+	Name string `json:"name"`
 
 	// +optional
+	// +kubebuilder:validation:Description="HTB class handle identifier (e.g., 1:100). If omitted, classMinor is used to construct handle '1:<minor>'."
+	ClassID string `json:"classId,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="HTB class minor number (1-65535) used to derive the class handle if classId is omitted."
+	ClassMinor int `json:"classMinor,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Enum=vlan;subnet;mark;ip;port;dscp
+	// +kubebuilder:validation:Description="Packet classification match type. Supported options: 'vlan', 'subnet', 'mark', 'ip', 'port', 'dscp'."
 	MatchType string `json:"matchType,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="VLAN Tag ID (1-4094) to match for traffic classification."
 	VlanID int `json:"vlanId,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="CIDR subnet block (e.g., 10.0.100.0/24) to match target packet destination/source IP addresses."
 	Subnet string `json:"subnet,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="FWMark 32-bit integer value to match packets pre-classified by iptables/nftables."
 	Mark uint32 `json:"mark,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="Specific IPv4 or IPv6 address to match for traffic classification."
 	IP string `json:"ip,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="TCP/UDP port number to match for traffic classification."
 	Port int `json:"port,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="DSCP Quality of Service code point value to match."
 	Dscp int `json:"dscp,omitempty"`
 
 	// Egress parameters
 	// +optional
+	// +kubebuilder:validation:Description="Guaranteed minimum egress bandwidth rate (e.g., 2Gbit, 500Mbit)."
 	EgressRate string `json:"egressRate,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="Maximum ceiling egress bandwidth rate for dynamic HTB borrowing (e.g., 10Gbit)."
 	EgressCeil string `json:"egressCeil,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="Egress token bucket burst buffer size (e.g., 16Mb, 64Mb) to absorb high-throughput TCP spikes."
 	EgressBurst string `json:"egressBurst,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="Enable FQ_CoDel Active Queue Management to prevent bufferbloat and optimize latency for small control-plane packets."
 	EnableFqCodel bool `json:"enableFqCodel,omitempty"`
 
 	// Ingress parameters
 	// +optional
+	// +kubebuilder:validation:Description="Guaranteed minimum ingress bandwidth rate (e.g., 2Gbit, 500Mbit)."
 	IngressRate string `json:"ingressRate,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="Maximum ceiling ingress bandwidth rate on IFB virtual devices (e.g., 10Gbit)."
 	IngressCeil string `json:"ingressCeil,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="Ingress token bucket burst buffer size (e.g., 16Mb, 64Mb) for TC policing/shaping."
 	IngressBurst string `json:"ingressBurst,omitempty"`
+
 	// +optional
+	// +kubebuilder:validation:Description="Action taken on packets exceeding policed rate: 'drop' (hard cap) or 'pass' (allow overlimit)."
 	IngressAction IngressAction `json:"ingressAction,omitempty"`
 
 	// +optional
+	// +kubebuilder:validation:Description="Strict evaluation priority (0-49152). Lower priority numbers are evaluated first in TC flower pipelines."
 	Priority int `json:"priority,omitempty"`
 }
 
@@ -116,34 +160,61 @@ func formatClassHandle(rootID, minorID int) string {
 
 // HtbRootSpec defines the root HTB qdisc parameters and attached class specs.
 type HtbRootSpec struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Description="Target host network interface name (e.g., enp1s0, eth0)."
 	Interface string `json:"interface"`
 
 	// +kubebuilder:default=1
 	// +optional
+	// +kubebuilder:validation:Description="Numeric handle ID for the root HTB qdisc (default is 1, creating handle '1:')."
 	HtbID int `json:"htbId,omitempty"`
 
 	// +optional
+	// +kubebuilder:validation:Description="Default HTB class handle for unclassified fallback traffic (e.g., '1:99')."
 	DefaultClassID string `json:"defaultClassId,omitempty"`
 
 	// +kubebuilder:default=99
 	// +optional
+	// +kubebuilder:validation:Description="Minor ID for default class if defaultClassId is omitted (default is 99)."
 	DefaultClassMinor int `json:"defaultClassMinor,omitempty"`
 
 	// +optional
+	// +kubebuilder:validation:Description="Total physical interface link capacity rate (e.g., 10Gbit, 1Gbit)."
 	Rate string `json:"rate,omitempty"`
 
 	// +listType=atomic
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Description="List of traffic class rules attached to this HTB root."
 	Classes []ClassSpec `json:"classes"`
 }
 
 // VlanTrafficControlSpec defines the desired state of VlanTrafficControl.
 type VlanTrafficControlSpec struct {
-	NodeSelector             map[string]string     `json:"nodeSelector,omitempty"`
-	NodeLabelSelector        *metav1.LabelSelector `json:"nodeLabelSelector,omitempty"`
-	Tolerations              []TolerationSpec      `json:"tolerations,omitempty"`
-	ReconcileIntervalSeconds int                   `json:"reconcileIntervalSeconds,omitempty"`
-	TcStrategy               TcStrategyType        `json:"tcStrategy"`
-	HtbRoot                  HtbRootSpec           `json:"htbRoot"`
+	// +optional
+	// +kubebuilder:validation:Description="Simple key-value node selector targeting specific OpenShift worker nodes."
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Standard Kubernetes label selector supporting matchLabels and matchExpressions for targeting nodes."
+	NodeLabelSelector *metav1.LabelSelector `json:"nodeLabelSelector,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="List of pod/CR policy scheduling tolerations required to run node agent pods on tainted worker/control-plane nodes."
+	Tolerations []TolerationSpec `json:"tolerations,omitempty"`
+
+	// +optional
+	// +kubebuilder:default=60
+	// +kubebuilder:validation:Description="Reconciliation loop interval in seconds for periodic drift checks (default is 60s)."
+	ReconcileIntervalSeconds int `json:"reconcileIntervalSeconds,omitempty"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=ifb;flower;u32;auto
+	// +kubebuilder:validation:Description="Traffic control strategy: 'ifb' (stateful HTB queueing/borrowing), 'flower' (stateless policing), 'u32', or 'auto'."
+	TcStrategy TcStrategyType `json:"tcStrategy"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Description="Root HTB qdisc parameters and attached class specifications."
+	HtbRoot HtbRootSpec `json:"htbRoot"`
 }
 
 type ClassStat struct {
@@ -226,9 +297,17 @@ type NodeConfigReport struct {
 }
 
 type VlanTrafficControlStatus struct {
-	Conditions         []metav1.Condition `json:"conditions,omitempty"`
-	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
-	ActiveNodes        []string           `json:"activeNodes,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Description="Current status conditions reflecting operator and agent synchronization states."
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Most recent generation observed and reconciled by the controller."
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="List of worker node names where the agent has applied and verified TC rules."
+	ActiveNodes []string `json:"activeNodes,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -240,6 +319,7 @@ type VlanTrafficControlStatus struct {
 // +kubebuilder:printcolumn:name="READY",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 
+// VlanTrafficControl is the Schema for the vlantrafficcontrols API
 type VlanTrafficControl struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -250,6 +330,7 @@ type VlanTrafficControl struct {
 
 // +kubebuilder:object:root=true
 
+// VlanTrafficControlList contains a list of VlanTrafficControl
 type VlanTrafficControlList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
@@ -257,26 +338,83 @@ type VlanTrafficControlList struct {
 }
 
 type VlanTrafficControlClassSpec struct {
-	ClassName     string        `json:"className"`
-	Direction     string        `json:"direction,omitempty"` // "ingress", "egress", or "both"
-	ClassID       string        `json:"classId"`
-	MatchType     string        `json:"matchType,omitempty"`
-	VlanID        int           `json:"vlanId,omitempty"`
-	Subnet        string        `json:"subnet,omitempty"`
-	Mark          uint32        `json:"mark,omitempty"`
-	IP            string        `json:"ip,omitempty"`
-	Port          int           `json:"port,omitempty"`
-	Dscp          int           `json:"dscp,omitempty"`
-	Guaranteed    string        `json:"guaranteed,omitempty"`
-	CeilBorrow    string        `json:"ceilBorrow,omitempty"`
-	EgressBurst   string        `json:"egressBurst,omitempty"`
-	EnableFqCodel bool          `json:"enableFqCodel,omitempty"`
-	IngressRate   string        `json:"ingressRate,omitempty"`
-	IngressCeil   string        `json:"ingressCeil,omitempty"`
-	IngressBurst  string        `json:"ingressBurst,omitempty"`
+	// +kubebuilder:validation:Description="Human-readable class name referenced from parent VlanTrafficControl CR."
+	ClassName string `json:"className"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Traffic flow direction for this class ('ingress', 'egress', or 'ingress+egress')."
+	Direction string `json:"direction,omitempty"`
+
+	// +kubebuilder:validation:Description="Resolved HTB class ID handle (e.g., '1:100', '1:380')."
+	ClassID string `json:"classId"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Traffic classification rule type used for matching."
+	MatchType string `json:"matchType,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="VLAN ID associated with this class projection."
+	VlanID int `json:"vlanId,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="IP Subnet CIDR associated with this class projection."
+	Subnet string `json:"subnet,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="FWMark value associated with this class projection."
+	Mark uint32 `json:"mark,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Target IP address associated with this class projection."
+	IP string `json:"ip,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Target TCP/UDP port associated with this class projection."
+	Port int `json:"port,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Target DSCP code point associated with this class projection."
+	Dscp int `json:"dscp,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Guaranteed bandwidth rate allocated for egress traffic."
+	Guaranteed string `json:"guaranteed,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Maximum ceiling rate allowed for dynamic egress bandwidth borrowing."
+	CeilBorrow string `json:"ceilBorrow,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Configured egress burst size buffer."
+	EgressBurst string `json:"egressBurst,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Indicates if FQ_CoDel Active Queue Management is enabled on this class."
+	EnableFqCodel bool `json:"enableFqCodel,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Guaranteed bandwidth rate allocated for ingress traffic."
+	IngressRate string `json:"ingressRate,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Maximum ceiling rate allowed for ingress IFB traffic."
+	IngressCeil string `json:"ingressCeil,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Configured ingress burst size buffer."
+	IngressBurst string `json:"ingressBurst,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Action taken when ingress rate is exceeded."
 	IngressAction IngressAction `json:"ingressAction,omitempty"`
-	Priority      int           `json:"priority,omitempty"`
-	Aligned       string        `json:"aligned,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Filter evaluation priority assigned to this class rule."
+	Priority int `json:"priority,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Alignment status confirming runtime kernel state matches this spec ('True' or 'False')."
+	Aligned string `json:"aligned,omitempty"`
 }
 
 // VlanTrafficControlClass represents a projected secondary resource exposing status, alignment, and traffic shaping metrics for individual HTB/IFB classes.

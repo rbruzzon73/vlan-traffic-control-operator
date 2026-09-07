@@ -26,11 +26,11 @@ func EnsureIfbDevice(physIface string, log logr.Logger) (string, error) {
 		}
 	}
 
-	cmdTxq := execHostCommand("ip", "link", "set", "dev", ifbName, "txqueuelen", "1000")
+	cmdTxq := execHostCommand("ip", "link", "set", "dev", ifbName, "txqueuelen", "10000")
 	if out, errTxq := cmdTxq.CombinedOutput(); errTxq != nil {
 		log.Error(fmt.Errorf("%s", string(out)), "[IFB] Warning: failed setting txqueuelen on IFB device", "ifbDev", ifbName)
 	} else {
-		log.Info("✓ Set txqueuelen=1000 on IFB device", "ifbDev", ifbName)
+		log.Info("✓ Set txqueuelen=10000 on IFB device", "ifbDev", ifbName)
 	}
 
 	cmdUp := execHostCommand("ip", "link", "set", "dev", ifbName, "up")
@@ -38,23 +38,89 @@ func EnsureIfbDevice(physIface string, log logr.Logger) (string, error) {
 		return "", fmt.Errorf("failed bringing UP IFB device %s: %s (%v)", ifbName, string(out), errUp)
 	}
 
+	// 1. ENSURE CLSACT / INGRESS QDISC ON PHYSICAL INTERFACE
+	cmdClsactQdisc := execHostCommand("tc", "qdisc", "add", "dev", physIface, "clsact")
+	_ = cmdClsactQdisc.Run()
+
 	cmdIngressQdisc := execHostCommand("tc", "qdisc", "add", "dev", physIface, "handle", "ffff:", "ingress")
 	_ = cmdIngressQdisc.Run()
 
-	// FLUSH STALE FILTERS: Clean up any old stateless policing rules on parent ffff:
+	// 2. FLUSH STALE STATELESS FILTERS
 	cmdFlushIngress := execHostCommand("tc", "filter", "del", "dev", physIface, "parent", "ffff:")
 	_ = cmdFlushIngress.Run()
 
-	// Add catch-all mirred redirect filter
-	cmdRedirect := execHostCommand("tc", "filter", "add", "dev", physIface, "parent", "ffff:",
+	cmdFlushClsact := execHostCommand("tc", "filter", "del", "dev", physIface, "ingress")
+	_ = cmdFlushClsact.Run()
+
+	// 3. ATTACH CATCH-ALL MIRRED REDIRECT FILTER TO BOTH INGRESS AND CLSACT HANDLES
+	cmdRedirectClsact := execHostCommand("tc", "filter", "add", "dev", physIface, "ingress",
 		"protocol", "all", "prio", "1", "handle", "1", "matchall",
 		"action", "mirred", "egress", "redirect", "dev", ifbName)
-	if out, errRedir := cmdRedirect.CombinedOutput(); errRedir != nil {
-		return "", fmt.Errorf("failed setting ingress redirect from %s to %s: %s (%v)", physIface, ifbName, string(out), errRedir)
+	if _, errRedir := cmdRedirectClsact.CombinedOutput(); errRedir != nil {
+		cmdRedirectLegacy := execHostCommand("tc", "filter", "add", "dev", physIface, "parent", "ffff:",
+			"protocol", "all", "prio", "1", "handle", "1", "matchall",
+			"action", "mirred", "egress", "redirect", "dev", ifbName)
+		if outLegacy, errLegacy := cmdRedirectLegacy.CombinedOutput(); errLegacy != nil {
+			return "", fmt.Errorf("failed setting ingress redirect from %s to %s: %s (%v)", physIface, ifbName, string(outLegacy), errLegacy)
+		}
 	}
 
 	log.Info("✅ [IFB] Ingress redirect active", "physIface", physIface, "ifbDev", ifbName)
 	return ifbName, nil
+}
+
+// EnsureIfbIngressFilters creates flower classification rules on IFB device to direct packets to target HTB classes
+func EnsureIfbIngressFilters(ifbDev string, spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) error {
+	rootHandle := spec.HtbID
+	if rootHandle <= 0 {
+		rootHandle = 1
+	}
+
+	// Ensure ingress qdisc on IFB device for filter placement
+	_ = execHostCommand("tc", "qdisc", "add", "dev", ifbDev, "ingress").Run()
+	_ = execHostCommand("tc", "filter", "del", "dev", ifbDev, "ingress").Run()
+
+	for idx, cls := range spec.Classes {
+		if cls.IngressRate == "" {
+			continue
+		}
+
+		prio := cls.Priority
+		if prio <= 0 {
+			prio = idx + 1
+		}
+
+		classID := cls.GetClassID(rootHandle)
+
+		if cls.VlanID > 0 {
+			vlanStr := fmt.Sprintf("%d", cls.VlanID)
+			cmdFlower := execHostCommand("tc", "filter", "add", "dev", ifbDev, "ingress",
+				"protocol", "802.1q", "prio", fmt.Sprintf("%d", prio), "handle", "1", "flower",
+				"vlan_id", vlanStr,
+				"classid", classID)
+			if _, err := cmdFlower.CombinedOutput(); err != nil {
+				// Fallback to skbedit priority if classid action is rejected by kernel netlink
+				cmdFallback := execHostCommand("tc", "filter", "add", "dev", ifbDev, "ingress",
+					"protocol", "802.1q", "prio", fmt.Sprintf("%d", prio), "handle", "1", "flower",
+					"vlan_id", vlanStr,
+					"action", "skbedit", "priority", classID)
+				_, _ = cmdFallback.CombinedOutput()
+			}
+		} else if cls.Subnet != "" {
+			cmdSubnet := execHostCommand("tc", "filter", "add", "dev", ifbDev, "ingress",
+				"protocol", "ip", "prio", fmt.Sprintf("%d", prio), "handle", "1", "flower",
+				"dst_ip", cls.Subnet,
+				"classid", classID)
+			if _, err := cmdSubnet.CombinedOutput(); err != nil {
+				cmdFallback := execHostCommand("tc", "filter", "add", "dev", ifbDev, "ingress",
+					"protocol", "ip", "prio", fmt.Sprintf("%d", prio), "handle", "1", "flower",
+					"dst_ip", cls.Subnet,
+					"action", "skbedit", "priority", classID)
+				_, _ = cmdFallback.CombinedOutput()
+			}
+		}
+	}
+	return nil
 }
 
 // ReconcileIngressHtb configures IFB redirection and applies HTB hierarchy + fq_codel leaf qdiscs
@@ -79,10 +145,13 @@ func ReconcileIngressHtb(physSpec *networkingv1alpha1.HtbRootSpec, log logr.Logg
 			cCopy := cls
 			cCopy.EnableFqCodel = true
 			cCopy.EgressRate = cls.IngressRate
+			cCopy.IngressRate = cls.IngressRate
 			if cls.IngressCeil != "" {
 				cCopy.EgressCeil = cls.IngressCeil
+				cCopy.IngressCeil = cls.IngressCeil
 			} else {
 				cCopy.EgressCeil = physSpec.Rate
+				cCopy.IngressCeil = physSpec.Rate
 			}
 			ingressClasses = append(ingressClasses, cCopy)
 		}
@@ -90,7 +159,11 @@ func ReconcileIngressHtb(physSpec *networkingv1alpha1.HtbRootSpec, log logr.Logg
 	ifbSpec.Classes = ingressClasses
 
 	log.Info("[IFB-HTB] Applying ingress HTB + fq_codel shaping tree to IFB device", "ifbDev", ifbDev, "classCount", len(ifbSpec.Classes))
-	return ApplyHtbHierarchy(&ifbSpec, log)
+	if errHtb := ApplyHtbHierarchy(&ifbSpec, log); errHtb != nil {
+		return errHtb
+	}
+
+	return EnsureIfbIngressFilters(ifbDev, &ifbSpec, log)
 }
 
 // FlushIfbDevice cleanly tears down and removes the virtual IFB device for an interface

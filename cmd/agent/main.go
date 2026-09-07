@@ -78,11 +78,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. Initial reconciliation pass on startup
-	log.Info("[INIT] Running startup TC reconciliation pass...")
-	reconcileLocalTc(k8sClient, nodeName, log)
-
-	// 4. HTTP /stats Handler
+	// 3. HTTP /stats Handler
 	http.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		rawIfaceParam := query.Get("interface")
@@ -97,7 +93,9 @@ func main() {
 
 		log.Info("[API] GET /stats", "clientIP", r.RemoteAddr, "interfaceParam", ifaceParam, "classNameParam", classNameParam, "targetVlan", targetVlan, "targetClassID", targetClassID)
 
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
 		hostNode := getHostNode(ctx, k8sClient, nodeName, log)
 
 		// Dynamic discovery of Class Names and Default Class Handles per targeting CR
@@ -209,7 +207,7 @@ func main() {
 		_ = json.NewEncoder(w).Encode(stats)
 	})
 
-	// 5. HTTP /cleanup Handler
+	// 4. HTTP /cleanup Handler
 	http.HandleFunc("/cleanup", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete && r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -237,6 +235,12 @@ func main() {
 		}
 		_ = executor.FlushInterface(ifbName)
 
+		deleteIfbCmd := exec.Command("chroot", "/host", "ip", "link", "delete", ifbName, "type", "ifb")
+		if errIfbDel := deleteIfbCmd.Run(); errIfbDel != nil {
+			_ = exec.Command("ip", "link", "delete", ifbName, "type", "ifb").Run()
+		}
+		log.Info("[CLEANUP] IFB virtual device interface deleted from host kernel", "ifbInterface", ifbName)
+
 		log.Info("========================================================================")
 
 		w.Header().Set("Content-Type", "application/json")
@@ -248,21 +252,36 @@ func main() {
 		})
 	})
 
-	// 6. HTTP /reconcile Handler
+	// 5. HTTP /reconcile Handler with 5s timeout safeguard
 	http.HandleFunc("/reconcile", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		log.Info("[API] POST /reconcile triggered by Manager", "client", r.RemoteAddr)
-		reconcileLocalTc(k8sClient, nodeName, log)
+		log.Info("[API] POST /reconcile triggered", "client", r.RemoteAddr)
 
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"reconciled","node":"` + nodeName + `"}`))
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		done := make(chan struct{}, 1)
+		go func() {
+			reconcileLocalTc(k8sClient, nodeName, log)
+			done <- struct{}{}
+		}()
+
+		select {
+		case <-done:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"reconciled","node":"` + nodeName + `"}`))
+		case <-ctx.Done():
+			log.Error(ctx.Err(), "[API] POST /reconcile timed out after 5s", "client", r.RemoteAddr)
+			http.Error(w, `{"error":"reconciliation timeout"}`, http.StatusGatewayTimeout)
+		}
 	})
 
-	// 7. HTTP /config Handler
+	// 6. HTTP /config Handler
 	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
 		iface := r.URL.Query().Get("interface")
 		if iface == "" {
@@ -271,7 +290,9 @@ func main() {
 
 		targetClassID := r.URL.Query().Get("classId")
 
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
 		hostNode := getHostNode(ctx, k8sClient, nodeName, log)
 
 		var list networkingv1alpha1.VlanTrafficControlList
@@ -285,6 +306,7 @@ func main() {
 		aggregatedSpec.Rate = "10Gbit"
 
 		hasMatchingPolicy := false
+		activeStrategy := networkingv1alpha1.TcStrategyType("flower")
 		classMap := make(map[string]*networkingv1alpha1.ClassSpec)
 
 		for _, item := range list.Items {
@@ -294,6 +316,9 @@ func main() {
 
 			if item.Spec.HtbRoot.Interface == iface {
 				hasMatchingPolicy = true
+				if item.Spec.TcStrategy != "" {
+					activeStrategy = item.Spec.TcStrategy
+				}
 				if item.Spec.HtbRoot.HtbID > 0 {
 					aggregatedSpec.HtbID = item.Spec.HtbRoot.HtbID
 				}
@@ -304,7 +329,6 @@ func main() {
 					aggregatedSpec.Rate = item.Spec.HtbRoot.Rate
 				}
 
-				// Deduplicate and merge class specifications by ClassID
 				for _, cls := range item.Spec.HtbRoot.Classes {
 					cID := cls.GetClassID(aggregatedSpec.HtbID)
 					existing, found := classMap[cID]
@@ -339,7 +363,7 @@ func main() {
 			log.Info("[CONFIG] No active VlanTrafficControl policy targets interface on this node", "nodeName", nodeName, "interface", iface)
 		}
 
-		report, err := executor.InspectNodeAlignment(&aggregatedSpec, targetClassID)
+		report, err := executor.InspectNodeAlignment(&aggregatedSpec, activeStrategy, targetClassID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("alignment check failed: %v", err), http.StatusInternalServerError)
 			return
@@ -354,6 +378,13 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+
+	// 7. Run initial reconciliation pass asynchronously AFTER starting HTTP server
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		log.Info("[INIT] Running asynchronous startup TC reconciliation pass...")
+		reconcileLocalTc(k8sClient, nodeName, log)
+	}()
 
 	log.Info("[HTTP] Agent HTTP server listening", "port", 8080)
 	if err := http.ListenAndServe(":8080", nil); err != nil {
@@ -426,7 +457,8 @@ func discoverActiveTcInterfaces(log logr.Logger) []string {
 }
 
 func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
 	hostNode := getHostNode(ctx, k8sClient, nodeName, log)
 
@@ -556,7 +588,6 @@ func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger)
 				err = errIfb
 			}
 		} else {
-			// Stateless policing on physical interface for non-IFB strategy
 			hasIngressRules := false
 			for _, cls := range aggSpec.Classes {
 				if cls.IngressRate != "" {
@@ -584,11 +615,11 @@ func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger)
 
 func getHostNode(ctx context.Context, k8sClient client.Client, nodeName string, log logr.Logger) *corev1.Node {
 	var hostNode corev1.Node
-	for attempts := 1; attempts <= 5; attempts++ {
+	for attempts := 1; attempts <= 3; attempts++ {
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, &hostNode); err == nil && len(hostNode.Labels) > 0 {
 			return &hostNode
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 	log.V(1).Info("[WARN] Could not fetch complete host node labels/taints from Kube API", "nodeName", nodeName)
 	return &hostNode

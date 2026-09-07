@@ -9,7 +9,7 @@ metadata:
     operatorframework.io/suggested-namespace: openshift-vlan-tc-operator
     operators.operatorframework.io/builder: operator-sdk-v1.42.3
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
-  name: vlan-traffic-control.v0.3.57
+  name: vlan-traffic-control.v0.3.83
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -120,4 +120,4 @@ spec:
   provider:
     name: rbruzzon73
     url: https://github.com/rbruzzon73
-  version: 0.3.57
+  version: 0.3.83

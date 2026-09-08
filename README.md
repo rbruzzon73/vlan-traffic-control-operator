@@ -14,15 +14,14 @@
 
 ---
 
-- **VLAN Traffic Control Operator** delivers fine-grained, declarative Quality of Service (QoS) and host-level network traffic shaping for OpenShift/Kubernetes clusters.
+# VLAN Traffic Control Operator
 
-- Standard Kubernetes bandwidth CNI plugins are often limited to basic pod-level ingress/egress rate limiting and fail to address non-pod traffic, secondary Multus interfaces, Open vSwitch (OVS) bridges, or hardware-stripped VLAN tags. 
-
-- This operator bridges that gap by allowing cluster administrators to manage Linux Traffic Control (`tc`) queueing disciplines, classifiers, and rate limiters natively across worker nodes using standard OpenShift Custom Resources.
+- **VLAN Traffic Control Operator** delivers fine-grained, declarative Quality of Service (QoS), traffic policing, and bandwidth shaping for OpenShift and Kubernetes host interfaces.
+- Standard CNI bandwidth plugins are typically limited to basic pod-level rate-limiting and cannot regulate non-pod host traffic, secondary Multus interfaces, OVS/Linux bridges, or hardware-stripped 802.1Q VLAN streams.
+- This operator bridges the CNI gap by enabling cluster administrators to declaratively manage Linux Traffic Control (`tc`) qdiscs, filters, IFB virtual devices, and classifiers natively across worker nodes using OpenShift Custom Resources (CRs).
 
 **References:**
-
-- The VlanTrafficControl Operator was originally defined and developed by `Riccardo Bruzzone (rbruzzon@redhat.com)`.
+- Original design and implementation by **Riccardo Bruzzone** (`rbruzzon@redhat.com`).
 
 ---
 
@@ -31,140 +30,156 @@
 The operator follows a dual-component architecture consisting of a cluster-wide **Controller Manager** and host-bound **Node Agents**:
 
 ```text
-+-----------------------------------------------------------------------------------+
-|                                 OpenShift Cluster                                 |
-|                                                                                   |
-|  +-------------------------------------+                                          |
-|  |  VlanTrafficControl CR (YAML Spec)  |                                          |
-|  +------------------+------------------+                                          |
-|                     |                                                             |
-|                     v                                                             |
-|  +-------------------------------------+                                          |
-|  |   vlan-tc-operator-controller       |  (Watches CRDs, validates specs,         |
-|  |             (Manager)               |   updates cluster-wide status)           |
-|  +------------------+------------------+                                          |
-|                     |                                                             |
-|                     | Reconciles via API & triggers Agent HTTP endpoints          |
-|                     v                                                             |
-|  +-----------------------------------------------------------------------------+  |
-|  |                           Worker Node (DaemonSet)                           |  |
-|  |                                                                             |  |
-|  |  +------------------------+        chroot /host     +--------------------+  |  |
-|  |  |   vlan-tc-agent Pod    | ----------------------> | Host OS Network    |  |  |
-|  |  | (HTTP API & Reconciler)|                         | Namespace (tc)     |  |  |
-|  |  +-----------+------------+                         +---------+----------+  |  |
-|  |              |                                                |             |  |
-|  |              | Fetches /stats                                 | Configures  |  |
-|  |              v                                                v             |  |
-|  |       +--------------+                              +--------------------+  |  |
-|  |       | Structured   |                              | HTB Qdisc, Flower, |  |  |
-|  |       | JSON Metrics |                              | FW & Ingress Police|  |  |
-|  |       +--------------+                              +--------------------+  |  |
-|  +-----------------------------------------------------------------------------+  |
-+-----------------------------------------------------------------------------------+
+```text
++----------------------------------------------------------------------------------------+
+|                                 OpenShift Cluster                                      |
+|                                                                                        |
+|  +----------------------------------------------------------------------------------+  |
+|  | VlanTrafficControl Custom Resources (Single or Split Ingress/Egress Manifests)   |  |
+|  +--------------------------------------+-------------------------------------------+  |
+|                                         |                                              |
+|                                         v                                              |
+|  +----------------------------------------------------------------------------------+  |
+|  |                   vlan-tc-operator-controller (Manager)                          |  |
+|  |      (Watches VTC CRDs, evaluates nodeSelectors, orchestrates Agents)            |  |
+|  +--------------------------------------+-------------------------------------------+  |
+|                                         |                                              |
+|                                         | Reconciles API state & triggers parallel     |
+|                                         | agent REST HTTP endpoints (/reconcile)       |
+|                                         v                                              |
+|  +----------------------------------------------------------------------------------+  |
+|  |                           Worker Node (DaemonSet)                                |  |
+|  |                                                                                  |  |
+|  |  +-------------------------+   chroot /host   +-------------------------------+  |  |
+|  |  |     vlan-tc-agent Pod   | ---------------> | Host Network Namespace        |  |  |
+|  |  | (REST API & Reconciler) |                  | (tc, netlink, kernel modules) |  |  |
+|  |  +------------+------------+                  +------------+------------------+  |  |
+|  |               |                                           |                      |  |
+|  |               | Exposes /stats                            | Configures           |  |
+|  |               v                                           v                      |  |
+|  |  +-------------------------+                  +--------------------------+       |  |
+|  |  | Aggregated JSON Metrics |                  | HTB Qdiscs, IFB Redirect,|       |  |
+|  |  | (enp1s0 & br-vlan380)   |                  | Flower & act_police      |       |  |
+|  |  +-------------------------+                  +--------------------------+       |  |
+|  +----------------------------------------------------------------------------------+  |
++----------------------------------------------------------------------------------------+
 ```
-
-### Component Architecture & Module Reference
-
-This document provides a detailed breakdown of every module and component comprising the **VLAN Traffic Control Operator**, outlining their scope, responsibilities, and operational behavior across the cluster and worker nodes.
 
 ---
 
-#### 1. Controller Manager (`cmd/manager` & `internal/controller`)
+## Package Directory Layout
 
-The Controller Manager is the central brain of the operator running at the cluster level. It acts as an orchestrator, handling resource lifecycle events and keeping cluster state aligned with Custom Resource definitions.
+```text
+pkg/
+├── controller
+│   └── vlantrafficcontrol_controller.go  # Cluster-wide CRD reconciler & agent orchestrator
+└── executor
+    ├── alignment.go     # Parallel strategy alignment verifier & validation state engine
+    ├── htb_executor.go  # Stateful HTB class hierarchy builder & egress filter manager
+    ├── ifb_executor.go  # IFB virtual netdevice creation & act_mirred ingress redirect engine
+    ├── modules.go       # Kernel module verifier (sch_htb, cls_flower, act_mirred, etc.)
+    ├── node_filter.go   # Evaluates nodeSelector rules & matches cluster host topology
+    ├── stats.go         # Dual-interface telemetry aggregator (physical links & bridges)
+    └── tc.go            # Core low-level tc wrapper & chroot host command execution engine
+cmd/
+├── agent
+│   └── main.go          # Node DaemonSet entrypoint, self-healing startup & REST HTTP API server
+└── manager
+    └── main.go          # Cluster Controller Manager entrypoint & operator bootstrap
+```
+---
+
+## Component Architecture & Module Reference
+
+### Dynamic Interface Targeting
+The operator contains **zero hardcoded network interface names**. Every physical uplink, bridge, or virtual link target is dynamically resolved at runtime from the `spec.htbRoot.interface` field in the applied `VlanTrafficControl` Custom Resource (e.g., `enp1s0`, `eth0`, `bond0`, or secondary bridge devices like `br-vlan380`). When using `tcStrategy: ifb`, virtual IFB netdevices are dynamically created and named on the fly using the format `ifb-<interface>`.
+
+---
+
+### 1. Controller Manager (`cmd/manager` & `pkg/controller`)
+The Controller Manager is the orchestrator running at the cluster control-plane level.
 
 * **Scope:** Cluster-wide control plane component.
 * **Responsibilities:**
-  * **CRD Watching:** Listens for `Create`, `Update`, and `Delete` events on `VlanTrafficControl` Custom Resources (`networking.med.io/v1alpha1`).
-  * **Node Targeting & Filtering:** Evaluates the `nodeSelector` block defined in the CRD to identify which worker nodes should receive traffic shaping policies.
-  * **Status Aggregation:** Collects health and reconciliation status from all node agents and updates the `.status` subresource of the `VlanTrafficControl` CR.
-  * **Agent Orchestration:** Calls the HTTP `/reconcile` or `/cleanup` REST endpoints on individual Node Agent pods to trigger immediate host-level updates whenever a CR is modified or deleted.
-* **Behavior:** Operates as a standard Kubernetes controller loop using `controller-runtime`. It does not execute direct `tc` commands on the host itself; instead, it delegates all host networking manipulations to the Node Agents.
+  * **CRD Watching:** Watches `Create`, `Update`, and `Delete` lifecycle events on `VlanTrafficControl` CRs (`networking.med.io/v1alpha1`).
+  * **Split-CR Support:** Processes single unified manifests or split CR configurations (e.g., dedicated egress on a physical interface and dedicated ingress on a secondary bridge interface).
+  * **Node Targeting (`pkg/executor/node_filter.go`):** Evaluates `nodeSelector` fields against cluster nodes to target policy application.
+  * **Parallel Agent Orchestration:** Triggers parallel `/reconcile` and `/cleanup` HTTP invocations across target Node Agents to minimize alignment latency.
+  * **Status Aggregation:** Collects health and reconciliation status from node agents and updates the `.status` subresource of the `VlanTrafficControl` CR.
 
 ---
 
-#### 2. Host Node Agent (`cmd/agent`)
+### 2. Host Node Agent (`cmd/agent`)
+The Node Agent is the execution daemon on every targeted worker host.
 
-The Host Node Agent is the execution engine running directly on every targeted worker node.
-
-* **Scope:** Host-bound DaemonSet pod running with host networking, privileged SCC permissions, and `/host` directory mounts.
+* **Scope:** Host-bound DaemonSet pod running with `hostNetwork: true`, privileged SCC, and `/host` filesystem access.
 * **Responsibilities:**
-  * **Host Traffic Shaping:** Executes `tc` commands inside the host network namespace via `chroot /host` to configure `htb` qdiscs, classes, and filters (`cls_flower`, `cls_fw`, `act_police`).
-  * **Startup Self-Healing:** Performs an automatic startup reconciliation pass (`reconcileLocalTc`) when spawned, ensuring host network interfaces (`enp1s0`, `br-ex`, bonds) match the desired CR state immediately after a node reboot or agent restart.
-  * **REST API Server:** Exposes an internal HTTP server on port `8080` providing:
-    * `GET /stats`: Returns real-time byte/packet statistics and queue metrics.
-    * `POST /reconcile`: Triggers an instant local `tc` rule sync.
-    * `POST /cleanup` / `DELETE /cleanup`: Performs selective removal of rules managed by the operator without disturbing other host qdiscs.
-    * `GET /healthz`: Health check probe endpoint.
-* **Behavior:** Runs continuously on worker nodes. When triggered, it reads cluster CRDs via `client-go` and invokes `pkg/executor` to safely apply or update host rules using `tc class replace` and `tc filter replace`.
+  * **Host Traffic Shaping:** Executes `tc` invocations inside the host network namespace via `chroot /host` to construct qdiscs, classes, filters, and IFB devices on dynamically specified interfaces.
+  * **Startup Self-Healing:** Runs `reconcileLocalTc` upon startup to restore target host network interfaces (physical links, bridges, or IFB devices) to the desired CR state after node reboots or pod restarts.
+  * **REST API Server (Port `8080`):**
+    * `GET /stats`: Accepts an `interface` query parameter and returns aggregated byte, packet, drop, and queue metrics for any target interface.
+    * `GET /config`: Accepts an `interface` query parameter and reports current interface alignment (`isAligned`) and configuration state.
+    * `POST /reconcile`: Triggers an immediate local `tc` rule reconciliation pass.
+    * `POST /cleanup` / `DELETE /cleanup`: Selectively purges operator-managed `tc` rules without impacting non-managed host qdiscs.
+    * `GET /healthz`: Agent readiness and liveness check probe.
 
 ---
 
-#### 3. Kernel Module Loader (`pkg/executor/modules.go`)
+### 3. Kernel Module Loader (`pkg/executor/modules.go`)
+Ensures the host kernel has necessary Traffic Control kernel modules loaded before applying rules.
 
-This module ensures the Linux kernel running on the host node has all required Traffic Control modules loaded before attempting rule execution.
-
-* **Scope:** Internal package function invoked during agent boot.
+* **Scope:** Internal agent package invoked during node agent initialization.
 * **Responsibilities:**
-  * Checks for loaded kernel modules by reading host module paths via `/lib/modules`.
-  * Automatically executes `modprobe` inside the host namespace (`chroot /host modprobe <module>`) if a module is missing.
-* **Modules Verified:**
-  * `sch_htb`: Hierarchy Token Bucket queueing discipline.
-  * `cls_flower`: Advanced multi-field packet classifier.
-  * `cls_fw`: Firewall mark filter module for `skbmark` matching.
-  * `act_police`: Rate policing action module for ingress caps.
-  * `sch_fq_codel`: Fair Queueing Controlled Delay AQM leaf qdisc.
-* **Behavior:** Non-destructive and idempotent. If modules are already built into the kernel or loaded, it logs a debug entry and continues; if missing, it attempts to load them dynamically.
+  * Verifies module presence and dynamically executes `chroot /host modprobe <module>` if required.
+* **Managed Modules:**
+  * `sch_htb`: Hierarchical Token Bucket queueing discipline.
+  * `ifb`: Intermediate Functional Block virtual network device driver.
+  * `act_mirred`: Packet mirroring/redirecting action for IFB routing.
+  * `cls_flower`: Multi-field classification engine (`protocol ip`, `protocol 802.1q`).
+  * `act_police`: Rate policing and frame dropping/passing action engine.
+  * `sch_fq_codel`: Fair Queueing Controlled Delay active queue management.
 
 ---
 
-#### 4. TC Execution Engine (`pkg/executor/tc.go`)
+### 4. Stateful HTB Execution Engine (`pkg/executor/htb_executor.go` & `pkg/executor/tc.go`)
+Builds and manages egress HTB bandwidth hierarchies on arbitrary target physical or virtual network links.
 
-This is the core low-level execution package that builds and executes deterministic Linux `tc` command sequences.
-
-* **Scope:** Core Go package relied upon by `cmd/agent`.
+* **Scope:** Internal package used by `cmd/agent`.
 * **Responsibilities:**
-  * **Qdisc & Class Hierarchy Creation:**
-    * Ensures the egress root HTB qdisc (`handle 1:`) and parent class (`1:1`) exist on the target interface.
-    * Configures the default fallback class (`1:99`) with priority 0 for unclassified traffic.
-    * Ensures the ingress qdisc (`handle ffff:`) is present for rate policing.
-  * **Child Class Allocation:** Adds or replaces HTB classes (`1:100`, `1:280`, etc.) specifying `rate`, `ceil`, `burst`, and `prio`.
-  * **AQM Leaf Attachment:** Optionally attaches `fq_codel` leaf qdiscs under HTB classes when `enableFqCodel: true`.
-  * **Filter Generation & Execution:**
-    * `ApplyClassEgressFilter`: Constructs egress classification filters attached to parent `1:`. Uses explicit numeric filter handles (`handle <minor>`) to allow atomic replacement.
-    * `ApplyClassIngressPolice`: Constructs ingress policing drop rules attached to parent `ffff:` using kernel `act_police`.
-* **Behavior:** Translates structured Go CRD specs into atomic command arrays (e.g., `chroot /host tc filter replace dev enp1s0 ...`) and handles Linux kernel execution output.
+  * Configures the root HTB qdisc (`handle 1:`) and parent class (`1:1`) on the interface specified in `spec.htbRoot.interface`.
+  * Establishes default fallback classes (e.g., `1:99`) for non-classified host traffic.
+  * Instantiates child traffic classes (e.g., `1:100`, `1:380`) specifying `rate`, `ceil`, `burst`, and `priority`.
+  * Optionally attaches `fq_codel` AQM leaf qdiscs to child classes.
+  * Applies numeric handles (`handle <minor>`) to egress filters for atomic rule replacement.
 
 ---
 
-#### 5. Classifier Resolver (`ResolveClassifier` in `pkg/executor/tc.go`)
+### 5. Ingress Strategy Engine: IFB vs. Flower (`pkg/executor/ifb_executor.go`)
+Executes the configured ingress strategy defined by `spec.tcStrategy` on the target interface.
 
-A dedicated decision-tree function responsible for selecting the correct Linux kernel classifier backend based on class criteria.
-
-* **Scope:** Internal utility function in `pkg/executor`.
-* **Responsibilities & Mapping:**
-  * **`matchType: vlan`** -> Returns `filterType: "flower"`, `protocol: "802.1Q"`, matching `vlan_id`.
-  * **`matchType: subnet`** -> Returns `filterType: "flower"`, `protocol: "ip"`, matching `src_ip` (egress) or `dst_ip` (ingress).
-  * **`matchType: mark`** -> Returns `filterType: "fw"`, `protocol: "all"`, matching `handle <mark> fw`.
-  * **`matchType: auto`** -> Evaluates specs top-down:
-    1. If `vlanId > 0` -> Selects `vlan` (`cls_flower`).
-    2. Else if `subnet != ""` -> Selects `subnet` (`cls_flower`).
-    3. Else if `mark > 0` -> Selects `mark` (`cls_fw`).
-* **Behavior:** Pure, side-effect-free evaluation logic that returns exact parameter strings and execution flags to the caller.
-
----
-
-#### 6. Statistics Collector (`pkg/executor/htb_executor.go`)
-
-This component queries the Linux kernel to retrieve real-time traffic shaping metrics for monitoring and API exposure.
-
-* **Scope:** Internal package invoked by the agent `/stats` HTTP endpoint.
+* **Scope:** Internal package used by `cmd/agent`.
 * **Responsibilities:**
-  * Executes `tc -s class show dev <iface>` and `tc -s filter show dev <iface> ingress` via `chroot /host`.
-  * Parses raw `tc` text outputs (bytes sent, packet counts, drops, rate overlimits, tokens, queue backlog) into structured Go structs and JSON objects.
-* **Behavior:** Read-only operation that provides high-frequency visibility into queue utilization and rate limit enforcement across nodes.
+  * **Stateful IFB Strategy (`tcStrategy: ifb`):**
+    * Dynamically creates a virtual device named `ifb-<interface>` corresponding to the target interface specified in the CR.
+    * Attaches an `ingress` qdisc (`ffff:`) on the target link with a `matchall` filter using `act_mirred` to redirect all inbound frames to `ifb-<interface>`.
+    * Applies full HTB class shaping on the dynamically created `ifb-<interface>` device.
+  * **Stateless Flower Strategy (`tcStrategy: flower`):**
+    * Instantiates `cls_flower` filters directly on ingress queues (`ffff:`) of the target interface.
+    * Applies `act_police` rate limiters with configurable exceed actions (`pass` or `drop`).
+    * Supports targeting any secondary bridge interface (e.g., OVS/Linux bridges) to capture demuxed VLAN traffic when NIC hardware offloading (`rx-vlan-offload`) strips 802.1Q headers on physical uplinks.
 
+---
+
+### 6. Dual-Interface Telemetry Engine (`pkg/executor/stats.go`)
+Aggregates real-time netlink performance metrics across physical, virtual, and bridge links.
+
+* **Scope:** Internal package backing the `GET /stats` API endpoint.
+* **Responsibilities:**
+  * Extracts HTB class statistics (`classStats`) on requested physical or virtual (`ifb-*`) devices.
+  * Extracts Flower filter statistics (`ingressStats`) on requested physical or bridge interfaces.
+  * Isolates demuxed stream counters from untagged physical host noise (`pref-49152`).
+  * Returns structured JSON telemetry payloads consumed by monitoring systems and validation pipelines.
+  
 ---
 
 ## Component Interaction Summary
@@ -179,65 +194,73 @@ This component queries the Linux kernel to retrieve real-time traffic shaping me
 │
 ▼
 [ Host Node Agent (cmd/agent) ]
-  ├── 1. Modules Loader (pkg/executor/modules.go)  ──> Loads sch_htb, cls_flower, cls_fw
-  ├── 2. Classifier Resolver (ResolveClassifier)   ──> Maps vlan/subnet/mark criteria
-  ├── 3. TC Engine (pkg/executor/tc.go)            ──> Executes chroot /host tc commands
-  └── 4. Stats Collector (htb_executor.go)         ──> Exposes /stats JSON metrics
-  ```
+  ├── 1. Modules Loader (pkg/executor/modules.go)   ──> Loads sch_htb, ifb, act_mirred, cls_flower
+  ├── 2. Strategy Resolver (pkg/executor/ifb_executor.go) ──> Resolves Strategy: flower vs ifb
+  ├── 3. TC Engine (pkg/executor/tc.go & htb_executor.go)──> Executes chroot /host tc commands
+  └── 4. Telemetry Collector (pkg/executor/stats.go)──> Exposes /stats aggregated JSON metrics
+```
 
 ---
 
 ### Key Capabilities & Traffic Control Features
 
-#### Flexible Multi-Match Classification
-Traffic identification goes beyond standard 802.1Q VLAN tags. The operator supports three primary classification backends to handle complex container and virtual machine networking topologies:
+#### Dual Ingress Strategy Architecture (`ifb` vs. `flower`)
+Traffic control on ingress streams supports two complementary operational modes configured via `spec.tcStrategy`:
 
-* **802.1Q VLAN Tag (`matchType: vlan`):** Uses `cls_flower` for direct matching on 802.1Q tagged frames traversing physical trunk interfaces or bond devices.
-* **IP Subnet / CIDR (`matchType: subnet`):** Uses `cls_flower` matching on source IP (`src_ip`) for egress and destination IP (`dst_ip`) for ingress. Ideal for OpenShift Virtualization (KubeVirt) or OVS bridge interfaces where VLAN tags are stripped prior to hitting the host Linux stack.
-* **Socket Buffer Mark (`matchType: mark`):** Uses `cls_fw` (`handle <mark> fw`) to match on 32-bit `skbmark` values set upstream by Open vSwitch flows, `iptables`, or `nftables`.
+* **Stateless Flower Policing (`tcStrategy: flower`):** Applies `cls_flower` filters directly on ingress queues (`ffff:`) with `act_police` rate limiters. Features flexible `ingressAction` behavior (`drop` for enforcement or `pass` for non-disruptive monitoring). Supports targeting secondary bridge interfaces (such as `br-vlan380`) to capture demuxed streams when NIC hardware offloading (`rx-vlan-offload`) strips 802.1Q tags on physical uplinks.
+* **Stateful IFB Redirection (`tcStrategy: ifb`):** Dynamically provisions an Intermediate Functional Block virtual device (`ifb-<interface>`) and redirects incoming traffic via `act_mirred`. This enables full `sch_htb` class queueing and hierarchical shaping on ingress traffic, mirroring egress functionality.
+
+#### Flexible Multi-Match Classification
+Traffic identification goes beyond standard 802.1Q VLAN tags. The operator supports three primary classification backends:
+
+* **802.1Q VLAN Tag (`matchType: vlan`):** Uses `cls_flower` for direct matching on 802.1Q tagged frames (`ethertype 0x8100`) traversing physical uplink or bond interfaces when hardware offloading is disabled.
+* **IP Subnet / CIDR (`matchType: subnet`):** Uses `cls_flower` matching on source IP (`src_ip`) for egress and destination IP (`dst_ip`) for ingress. Ideal for OpenShift Virtualization (KubeVirt) or software bridge interfaces (`br-vlan380`) where VLAN tags are demuxed prior to reaching host Layer 3 sockets.
+* **Socket Buffer Mark (`matchType: mark`):** Uses `cls_fw` (`handle <mark> fw`) to match on 32-bit `skbmark` values set upstream by Open vSwitch (OVS) flows, `iptables`, or `nftables`.
 * **Auto-Detection (`matchType: auto`):** Dynamically inspects class attributes and automatically selects the optimal classifier (`flower` or `fw`).
 
 #### Hierarchy Token Bucket (HTB) & Traffic Shaping
-* **Guaranteed Egress Bandwidth (`egressRate`):** Guarantees minimum outbound bandwidth allocation per traffic class under heavy contention.
-* **Burst Ceilings (`egressCeil`):** Limits maximum burst rate capacity when excess root interface bandwidth is available.
-* **Ingress Rate Policing (`ingressRate` & `ingressBurst`):** Enforces hard bandwidth caps on incoming interface traffic using kernel `act_police` drop filters on the `ingress` (`ffff:`) qdisc.
+* **Guaranteed Egress Bandwidth (`egressRate`):** Guarantees minimum outbound bandwidth allocation per traffic class under network contention.
+* **Burst Ceilings (`egressCeil`):** Limits maximum burst rate capacity when excess root interface bandwidth is available for borrowing.
+* **Ingress Rate Policing (`ingressRate` & `ingressBurst`):** Enforces rate caps on incoming traffic using kernel `act_police` filters on the `ingress` (`ffff:`) qdisc or dedicated IFB classes.
 * **Priority Queuing (`priority`):** Assigns HTB and filter priority bands (1–7) to ensure latency-sensitive control traffic or storage networks pre-empt bulk data flows.
 
 #### Active Queue Management (AQM)
-* **Bufferbloat Prevention (`enableFqCodel`):** Automatically attaches `fq_codel` (Fair Queueing Controlled Delay) leaf qdiscs beneath HTB classes to minimize queue latency and prevent TCP bufferbloat under maximum throughput conditions.
+* **Bufferbloat Prevention (`enableFqCodel`):** Automatically attaches `fq_codel` (Fair Queueing Controlled Delay) leaf qdiscs beneath HTB classes to minimize queue latency and combat bufferbloat under high throughput.
 
 ---
 
 ### Target Use Cases
 
-* **Shared Interface & Live-Migration Protection:** On hyperconverged host interfaces shared across OpenShift control plane services, OpenStack/KubeVirt VM networks, and storage VLANs, high-burst operations like **VM live migrations** can saturate physical links. By assigning strict priority bands (`priority: 1`) and rate ceilings, you ensure critical services like **ETCD heartbeat/consensus traffic** remain pre-empted and latency-protected.
-* **OpenShift Virtualization / KubeVirt:** Enforce strict egress and ingress bandwidth caps on virtual machine secondary interfaces (SR-IOV, Multus, or OVS bridge ports) to prevent individual tenant VMs from monopolizing node-level network capacity.
-* **Multi-Tenant Storage Isolation:** Prioritize latency-sensitive NVMe-oF, Ceph, or iSCSI storage traffic (e.g., VLAN 100/200) over standard pod egress traffic on shared 10G/25G/100G host NICs.
+* **Live-Migration Traffic Isolation:** Live VM migrations in hyperconverged OpenShift Virtualization clusters can easily saturate host interfaces. By deploying split Custom Resources (shaping egress on physical uplinks while policing demuxed ingress on bridge interfaces like `br-vlan380`), migration streams (`~1GB+`) can be strictly bandwidth-capped and isolated from host background noise without impacting control plane communications.
+* **Control Plane Protection:** On shared NICs carrying both OpenShift infrastructure and tenant workloads, assigning strict priority bands (`priority: 1`) protects critical services like **ETCD consensus traffic** and API server communication against starvation.
+* **Multi-Tenant Storage Isolation:** Prioritize latency-sensitive Ceph, iSCSI, or NVMe-oF storage traffic over standard application pod egress traffic on shared 10G/25G/100G host NICs.
 * **Edge & Far-Edge Deployments:** Manage tight bandwidth constraints on resource-constrained edge nodes communicating over limited backhaul or satellite links by strictly queueing bulk data behind real-time applications.
 
 ---
 
 ## Custom Resource Definition (CRD) Reference
 
-The `VlanTrafficControl` Custom Resource (`networking.med.io/vlan-traffic-control`) defines the desired traffic shaping state, target nodes, and pod scheduling tolerations.
+The `VlanTrafficControl` Custom Resource (`networking.med.io/v1alpha1`) defines the desired traffic shaping state, target nodes, and scheduling tolerations.
 
 ### `VlanTrafficControlSpec` (`spec`)
 
 | Field | Type | Required | Default | Description |
 | :--- | :--- | :---: | :---: | :--- |
-| `nodeSelector` | `map[string]string` | No | `{}` | Map of node labels used to select target worker or infrastructure nodes (e.g., `node-role.kubernetes.io/worker: ""`). |
+| `nodeSelector` | `map[string]string` | No | `{}` | Map of node labels used to target worker or infrastructure nodes (e.g., `node-role.kubernetes.io/worker: ""`). |
 | `nodeLabelSelector` | `Object` | No | `[]` | Kubernetes label selector matching (`matchLabels` & `matchExpressions`). |
-| `tolerations` | `[]Toleration` | No | `[]` | Pod/daemonset tolerations allowing execution on tainted nodes (e.g., master/control-plane). |
+| `tolerations` | `[]Toleration` | No | `[]` | Pod/DaemonSet tolerations allowing execution on tainted nodes (e.g., master/control-plane). |
 | `reconcileIntervalSeconds` | `integer` | No | `30` | Interval in seconds between node agent reconciliation loops. |
-| `tcStrategy` | `string` | **Yes** | `"flower"` | Traffic control strategy execution mode (`flower`, `u32`, `auto`). |
-| `htbRoot` | `HtbRootSpec` | **Yes** | — | Root HTB and interface configuration. |
+| `tcStrategy` | `string` | **Yes** | `"flower"` | Ingress execution strategy (`flower` for stateless policing or `ifb` for stateful queue shaping). |
+| `htbRoot` | `HtbRootSpec` | **Yes** | — | Root HTB and target interface configuration. |
+
+---
 
 ### Node Targeting & Taint Tolerations
 
 The operator provides granular control over which nodes in the cluster receive traffic control rules:
 
-* **`nodeSelector` Label Matching:** Restricts policy enforcement strictly to worker nodes matching specified key-value labels. If left empty (`{}`), all accessible nodes are evaluated.
-* **`tolerations` Support:** Allows the host agent to schedule and execute on tainted nodes, such as master nodes (`node-role.kubernetes.io/master:NoSchedule`), control-plane nodes (`node-role.kubernetes.io/control-plane:NoSchedule`), or dedicated edge/storage infrastructure nodes. Standard Kubernetes toleration fields (`key`, `operator`, `value`, `effect`, `tolerationSeconds`) are supported.
+* **`nodeSelector` Label Matching:** Restricts policy enforcement strictly to nodes matching specified key-value labels. If left empty (`{}`), all accessible nodes are evaluated.
+* **`tolerations` Support:** Allows the host agent DaemonSet to schedule and execute on tainted nodes, such as master nodes (`node-role.kubernetes.io/master:NoSchedule`), control-plane nodes, or dedicated infrastructure hosts. Standard Kubernetes toleration fields (`key`, `operator`, `value`, `effect`, `tolerationSeconds`) are fully supported.
 
 ---
 
@@ -245,52 +268,50 @@ The operator provides granular control over which nodes in the cluster receive t
 
 | Field | Type | Required | Default | Description |
 | :--- | :--- | :---: | :---: | :--- |
-| `interface` | `string` | **Yes** | — | Target physical, bond, or bridge network interface name (e.g., `enp1s0`, `br-ex`). |
-| `rate` | `string` | **Yes** | — | Total root egress bandwidth rate capacity for the interface (e.g., `10Gbit`). |
-| `defaultClassId` | `string` | No | `"1:99"` | Default HTB class ID where unclassified traffic is routed. |
-| `htbId` | `integer` | No | `1` | Custom HTB root handle ID. |
-| `classes` | `[]VlanClassSpec` | **Yes** | — | List of individual traffic control class definitions configured under this root. |
+| `interface` | `string` | **Yes** | — | Target physical link (`enp1s0`), bond (`bond0`), or bridge interface (`br-vlan380`). Dynamically resolved at runtime without hardcoding. |
+| `rate` | `string` | **Yes** | — | Total root egress bandwidth capacity for the target interface (e.g., `10Gbit`). |
+| `defaultClassId` | `string` | No | `"1:99"` | Default HTB minor class ID where unclassified egress traffic is routed. |
+| `htbId` | `integer` | No | `1` | Major handle ID for the root HTB qdisc (defines the `major:` prefix, e.g., `1:`). |
+| `classes` | `[]VlanClassSpec` | **Yes** | — | List of individual traffic class definitions configured under this root. |
 
-Notes on Interface Target Selection:
+#### Guidance on Interface Target Selection:
 
-- Bond Master Interface (bond0): Use this for bonded physical setups. When physical interfaces (enp1s0, enp2s0) are aggregated into a Linux network bond, attach and query the HTB root qdisc on bond0. This allows HTB to arbitrate bandwidth across all VLANs (100, 280, 380) traversing the bond.
+* **Bond Master Interface (`bond0`):** Use for bonded physical NICs. Applying HTB qdiscs to `bond0` allows unified bandwidth arbitration across all VLANs traversing the bond.
+* **Physical Interface (`enp1s0` / `eth0`):** Use for non-bonded single-NIC setups to apply global egress shaping across physical uplinks.
+* **Software Bridge Interface (`br-vlan380`):** Recommended for Flower ingress rules when NIC hardware offloading (`rx-vlan-offload`) strips 802.1Q tags on physical NICs. Attaching to the bridge targets demuxed IPv4 streams cleanly.
 
-- Parent Physical Interface (enp1s0): Use for non-bonded single-NIC setups to apply global multi-VLAN QoS policies across physical egress.
-
-- Bridge Interface (br-vlan100 / br-vlan380): Use when applying dedicated per-VLAN rate limiting directly on the host's Layer 3 gateway bridge.
-
-- Note: Avoid querying enp1s0.100 directly, as slave VLAN sub-interfaces do not hold the root HTB qdisc in this bridge topology.
+---
 
 ### `VlanClassSpec` (`spec.htbRoot.classes[]`)
 
 | Field | Type | Required | Default | Description |
 | :--- | :--- | :---: | :---: | :--- |
-| `name` | `string` | **Yes** | — | Human-readable descriptor mapped 1:1 across egress and ingress filters. |
+| `name` | `string` | **Yes** | — | Human-readable identifier for the class configuration. |
 | `matchType` | `string` | No | `"auto"` | Classification strategy (`vlan`, `subnet`, `mark`, `auto`). |
-| `classId` | `string` | **Yes** | — | Unique HTB minor class identifier on the interface (e.g., `1:100`). Format: `^1:[0-9]+$`. |
+| `classId` | `string` | **Yes** | — | Unique HTB class identifier on the interface (e.g., `1:380`). Format: `^1:[0-9]+$`. |
 | `vlanId` | `integer` | Conditional | — | 802.1Q VLAN tag ID (1–4094). **Required** if `matchType` is `vlan`. |
 | `subnet` | `string` | Conditional | — | IPv4 CIDR subnet (e.g., `10.200.0.0/24`). **Required** if `matchType` is `subnet`. |
 | `mark` | `uint32` | Conditional | — | 32-bit SKB mark set by OVS or iptables (e.g., `16`). **Required** if `matchType` is `mark`. |
 | `egressRate` | `string` | **Yes** | — | Guaranteed outbound bandwidth rate (e.g., `50Mbit`, `1Gbit`). |
 | `egressCeil` | `string` | No | `egressRate` | Maximum allowed outbound burst bandwidth ceiling (e.g., `200Mbit`, `10Gbit`). |
 | `egressBurst` | `string` | No | `"1250b"` | Outbound burst buffer size (e.g., `15k`, `30k`). |
-| `ingressRate` | `string` | No | `""` | Hard policing bandwidth cap for incoming interface traffic (e.g., `30Mbit`). |
-| `ingressBurst` | `string` | No | `"100k"` | Incoming policing burst buffer size (e.g., `15k`, `50k`). |
-| `ingressAction` | `string` | No | `"drop"` | Action for exceeding traffic. Valid values: **`drop`** (hard drop) or **`pass`** (monitor mode). |
+| `ingressRate` | `string` | No | `""` | Rate limit for incoming traffic on this class (e.g., `30Mbit`, `256Mb`). |
+| `ingressBurst` | `string` | No | `"100k"` | Incoming policing burst buffer size (e.g., `15k`, `256Mb`). |
+| `ingressAction` | `string` | No | `"drop"` | Policing action when traffic exceeds thresholds: **`drop`** (hard rate limit) or **`pass`** (monitor mode / telemetry collection). |
 | `priority` | `integer` | No | `0` | HTB priority and TC filter priority level (1 = Highest Priority, 7 = Lowest Priority). |
-| `enableFqCodel` | `boolean` | No | `true` | Toggles attaching an `fq_codel` leaf qdisc to prevent bufferbloat under heavy load. |
+| `enableFqCodel` | `boolean` | No | `true` | Toggles attaching an `fq_codel` leaf qdisc to combat bufferbloat under heavy load. |
+
+---
 
 ### How `matchType: auto` Works
 
-When `matchType: auto` is used (or if `matchType` is left blank), the operator automatically infers the correct classifier module (`flower` vs `fw`) and protocol by inspecting which fields are defined in your class specification.
+When `matchType: auto` is specified (or if `matchType` is omitted), the operator automatically infers the correct classifier module (`flower` vs `fw`) by evaluating configured parameters top-down:
 
-It evaluates your configuration using a top-down priority cascade:
+1. **802.1Q Tag (`vlanId > 0`):** Configures a `cls_flower` **L2 802.1Q filter** (`protocol 802.1q flower vlan_id <vlanId>`).
+2. **IP Subnet (`subnet != ""`):** Configures a `cls_flower` **L3 IP filter** (`protocol ip flower src_ip/dst_ip <subnet>`).
+3. **SKB Mark (`mark > 0`):** Configures a `cls_fw` **Firewall Mark filter** (`protocol all handle <mark> fw`).
 
-1. **802.1Q Tag (`vlanId > 0`):** Configures a `cls_flower` **L2 802.1Q VLAN tag filter** (`tc filter ... protocol 802.1Q flower vlan_id <vlanId>`).
-2. **IP Subnet (`subnet != ""`):** Configures a `cls_flower` **L3 IP filter** (`tc filter ... protocol ip flower src_ip/dst_ip <subnet>`).
-3. **SKB Mark (`mark > 0`):** Configures a `cls_fw` **Firewall Mark filter** (`tc filter ... protocol all handle <mark> fw`).
-
-> **Note:** If `matchType: auto` is set but none of `vlanId`, `subnet`, or `mark` are defined, the agent safely logs a validation warning, skips filter creation for that specific class, and continues processing without crashing.
+> **Note:** If `matchType: auto` is set but none of `vlanId`, `subnet`, or `mark` are supplied, the node agent logs a validation warning and skips filter creation for that class without interrupting overall reconciliation.
 
 ---
 

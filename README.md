@@ -849,7 +849,7 @@ Payload traffic originates from the source VM on `hub-worker01`, gets shaped by 
                    │ ════════════════► FORWARD MIGRATION STREAM ══════════════════════►  │
                    │                    (Memory Pages & VM State)                        │
                    └─────────────────────────────────────────────────────────────────────┘
-                                          (Physical Network / VLAN 380 Wire)
+                                     (Physical Network / VLAN 380 Wire)
 ```
 
 ---
@@ -880,9 +880,9 @@ Return control traffic (TCP ACKs and protocol handshakes) originates at `hub-wor
  └─────────────────▲──────────────────┘                                                  │
                    │                                                                     │
                    │  ◄═══════════════ RETURN CONTROL FLOW ════════════════════════════  │
-                   │                 (TCP ACKs & Protocol Handshakes)                    │
+                   │               (TCP ACKs & Protocol Handshakes)                      │
                    └─────────────────────────────────────────────────────────────────────┘
-                                          (Physical Network / VLAN 380 Wire)
+                                  (Physical Network / VLAN 380 Wire)
 ```
 
 #### Bi-Directional Migration Flow under Flower:

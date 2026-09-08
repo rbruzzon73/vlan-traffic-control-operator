@@ -1499,4 +1499,64 @@ LATENCY & PROCESSING OVERHEAD COMPARISON BY TC STRATEGY
 3. **Use `tcStrategy: ifb` Only When Stateful Ingress Queueing Is Mandatory:** Deploy IFB when inbound traffic streams explicitly require full HTB queuing trees, leaf AQM (`fq_codel`), and dynamic bandwidth borrowing rather than stateless token-bucket policing caps.
 
 
+## Openshift VLAN Traffic Control installation in Red Hat OpenShift 4.x (test performed on 4.20)
+
+- Deploy the VLAN Traffic Control Operator from the OpenShift VLAN Traffic Control catalog source within Red Hat OpenShift 4.
+
+     - Points Of Attention:
+        - The latest version of the VLAN Traffic Control Operator is 0.3.83, which was released on September 8, 2026.
+        - Please note that the images included in the following section are for illustrative purposes only and may not represent the most recent version released.
+
+```yaml
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: vlan-traffic-control-catalog
+  # MUST be openshift-marketplace for OperatorHub UI visibility
+  namespace: openshift-marketplace
+spec:
+  displayName: Community
+  sourceType: grpc
+  image: ghcr.io/rbruzzon73/vlan-traffic-control-catalog:v0.3.83
+  updateStrategy:
+    registryPoll:
+      interval: 30m
+```
+
+- Navigate to the Red Hat OpenShift Web Console, select **Ecosystem > Software Catalog**, and locate the VLAN Traffic Control Operator.
+
+ <p align="left">
+        <em><strong>Figure 1 - Red Hat OpenShift Software Catalog</strong></em><br>
+        <img src="OperatorImages/1-VLAN-opratore.jpg" width="850">
+      </p>
+      <br>
+
+- Verify that the alpha channel and the latest available version are selected, then initiate the installation by clicking **Install**.
+
+ <p align="left">
+        <em><strong>Figure 1 - Operator Installation</strong></em><br>
+        <img src="OperatorImages/2-OperatorLastVersion.jpg" width="850">
+      </p>
+      <br>
+
+- Accept and confirm the default configuration settings on the **Install Operator** page.
+
+ <p align="left">
+        <em><strong>Figure 1 - Default Installation Parameters</strong></em><br>
+        <img src="OperatorImages/3-OperatorInstall.jpg" width="850">
+      </p>
+      <br>
+
+- Upon successful installation, click **View Operator** to access and customize the VLAN Traffic Control Operator settings.
+
+ <p align="left">
+        <em><strong>Figure 1 - VLAN Traffic Control Operator settings</strong></em><br>
+        <img src="OperatorImages/5-OperatorDetails.jpg" width="850">
+      </p>
+      <br>
+
+---
+     
+
+
 

@@ -1499,12 +1499,12 @@ LATENCY & PROCESSING OVERHEAD COMPARISON BY TC STRATEGY
 3. **Use `tcStrategy: ifb` Only When Stateful Ingress Queueing Is Mandatory:** Deploy IFB when inbound traffic streams explicitly require full HTB queuing trees, leaf AQM (`fq_codel`), and dynamic bandwidth borrowing rather than stateless token-bucket policing caps.
 
 
-## Openshift VLAN Traffic Control installation in Red Hat OpenShift 4.x (test performed on 4.20)
+## Openshift VLAN Traffic Control installation in Red Hat OpenShift 4.x (test environment based on 4.20)
 
 - Deploy the VLAN Traffic Control Operator from the OpenShift VLAN Traffic Control catalog source within Red Hat OpenShift 4.
 
      - Points Of Attention:
-        - The latest version of the VLAN Traffic Control Operator is 0.3.83, which was released on September 8, 2026.
+        - The latest version of the VLAN Traffic Control Operator is **0.3.83**, which was released on September 8, 2026.
         - Please note that the images included in the following section are for illustrative purposes only and may not represent the most recent version released.
 
 ```yaml

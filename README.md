@@ -893,32 +893,20 @@ Return control traffic (TCP ACKs and protocol handshakes) originates at `hub-wor
 
 ---
 
-#### Telemetry Measurement Points & Netlink Metrics
+#### Telemetry Measurement Points & Netlink Metrics (Flower Strategy)
 
-The Flower architecture exposes netlink filter and qdisc performance counters via the REST API server (`/config` and `/stats`):
-
-| Measurement Point | TC Location & Qdisc | Exposed REST Endpoint & JSON Field | Collected Metrics & Telemetry Focus |
-| :--- | :--- | :--- | :--- |
-| **[Point 1] [Point 3]** | `enp1s0` / `sch_htb` | `/stats` $\rightarrow$ `.classStats[]` (`direction: egress`) | Physical outbound byte/packet counts, drops, overlimits, and HTB class borrowing statistics for egress class `1:380`. |
-| **[Point 2] [Point 4]** | `br-vlan380` / `clsact` | `/stats` $\rightarrow$ `.ingressStats[]` | Per-filter match byte counters, packet counts, and `act_police` drop/exceed counters for demuxed migration streams. |
-| **Filter Config** | `enp1s0` & `br-vlan380` | `/config` $\rightarrow$ `.actual.ingressFilters[]` | Reports configured filter priority (`pref 1`, `pref 3`), handle IDs, classification match criteria, and policing action (`drop` or `pass`). |
-
----
-
-## Telemetry Measurement Points & Netlink Metrics
-
-The operator captures statistics at discrete points along physical and virtual packet paths, exposing them via the REST API endpoints (`/config` and `/stats`). Output payloads explicitly include the `direction` field (`ingress` or `egress`) and the target `interface` name to simplify metric aggregation across multi-interface worker topologies.
+The operator captures statistics across both physical uplinks and virtual software bridges along the bi-directional packet paths, exposing them via the REST API endpoints (`/config` and `/stats`). Output payloads explicitly include the `direction` field (`ingress` or `egress`) and the target `interface` name to simplify metric aggregation across worker nodes:
 
 | Measurement Point | TC Location & Qdisc | Exposed REST Endpoint & JSON Field | Collected Metrics & Telemetry Focus |
 | :--- | :--- | :--- | :--- |
-| **[Point 1]** | `enp1s0` / `clsact` | `/config` $\rightarrow$ `.actual.ingressFilters[]` | Action parameters (`mirred redirect dev ifb-enp1s0`), filter priority, handle ID, and attachment interface. |
-| **[Point 2]** | `enp1s0` / `sch_htb` | `/stats` $\rightarrow$ `.classStats[]` (`direction: egress`, `interface: enp1s0`) | Physical outbound byte/packet counts, drops, rate overlimits, and HTB class borrowing statistics on `enp1s0`. |
-| **[Point 3]** | `ifb-enp1s0` / `cls_flower` | `/stats` $\rightarrow$ `.ingressStats[]` (`direction: ingress`, `interface: ifb-enp1s0`) | Per-filter classification match counters (bytes, packets, drops) associated with VLAN 380 rules on `ifb-enp1s0`. |
-| **[Point 4]** | `ifb-enp1s0` / `sch_htb` | `/stats` $\rightarrow$ `.classStats[]` (`direction: ingress`, `interface: ifb-enp1s0`) | Stateful inbound byte/packet counters, drops, overlimits, and borrowing statistics on the `ifb-enp1s0` device. |
+| **[Point 1]** | `enp1s0` / `sch_htb` (Source Egress) | `/stats` $\rightarrow$ `.classStats[]` (`direction: egress`, `interface: enp1s0`) | Outbound payload byte/packet counts, rate overlimits, and HTB class borrowing statistics for migration class `1:380` on `hub-worker01`. |
+| **[Point 2]** | `br-vlan380` / `clsact` (Destination Ingress) | `/stats` $\rightarrow$ `.ingressStats[]` (`direction: ingress`, `interface: br-vlan380`) | Per-filter match counters, incoming byte/packet rates, and `act_police` drop counts for demuxed migration streams on `hub-worker02`. |
+| **[Point 3]** | `enp1s0` / `sch_htb` (Destination Egress) | `/stats` $\rightarrow$ `.classStats[]` (`direction: egress`, `interface: enp1s0`) | Return outbound TCP ACK byte/packet counts and HTB egress queue statistics for class `1:380` on `hub-worker02`. |
+| **[Point 4]** | `br-vlan380` / `clsact` (Source Ingress) | `/stats` $\rightarrow$ `.ingressStats[]` (`direction: ingress`, `interface: br-vlan380`) | Ingress match counters and `act_police` rate-policing stats for return control traffic arriving on `hub-worker01`. |
 
 ---
 
-### OpenShift Cluster Metrics & Ingress Filter Observability
+### VLAN Traffic Control Metrics & Ingress Filter Observability
 
 This section details how the `vlan-traffic-control-agent` DaemonSet collects real-time Traffic Control (TC) telemetry across all OpenShift worker nodes, exposes structured egress (including HTB priority levels, default class statistics, and bandwidth borrowing) and ingress bandwidth metrics, and maps kernel netlink filter stats directly back to `VlanTrafficControl` Custom Resources.
 

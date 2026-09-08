@@ -317,109 +317,142 @@ When `matchType: auto` is specified (or if `matchType` is omitted), the operator
 
 ## Full Manifest Example
 
-This complete example demonstrates all four classification strategies (`vlan`, `subnet`, `mark`, and `auto`) configured on a single physical host interface:
+### VLAN Traffic Control CR with Flower tcStrategy - VLAN 380 defined as live migration vlan  
+
+```yaml
+# Egress Custom Resource: Physical Link Egress Bandwidth Shaping
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: flower-vlan-tc-egress
+  namespace: openshift-vlan-tc-operator
+spec:
+  tcStrategy: flower           # Stateless Flower classifier strategy; uses cls_flower filters on ingress/egress queues with act_police rate limiters
+  reconcileIntervalSeconds: 60 # Node agent reconciliation interval to ensure host tc configuration alignment
+  nodeSelector:
+    node-role.kubernetes.io/worker: "" # Targets all standard OpenShift worker nodes in the cluster
+  htbRoot:
+    interface: enp1s0          # Physical network interface attached to the host uplink
+    rate: 10Gbit               # Maximum physical line speed available to the root HTB qdisc
+    htbId: 1                   # Major handle ID (1:) for the root HTB queuing discipline
+    defaultClassId: "1:99"     # Directs all unclassified egress traffic into class 1:99
+    defaultClassMinor: 99
+    classes:
+      # Default Control-Plane Fallback (etcd, API, Kubelet, Node Management)
+      - name: default-fallback
+        classId: "1:99"
+        priority: 0            # Absolute highest priority (prio 0); HTB processes these queues before any tenant or migration queues
+        egressRate: 10Gbit     # Guaranteed egress rate set to full wire speed; prevents host management traffic from ever bottlenecking
+        enableFqCodel: false   # Disables fq_codel leaf qdisc to ensure simple FIFO queuing for fallback streams
+
+      # High Priority Tenant Traffic (VLAN 100)
+      - name: vlan-100-high-priority
+        classId: "1:100"
+        vlanId: 100
+        matchType: subnet       # L3 classification backend; matches destination IP subnet using cls_flower
+        subnet: 10.0.100.0/24   # Target IP range for high-priority tenant workloads
+        priority: 1            # Priority 1 evaluation; served after control plane (prio 0) but before live migration (prio 3)
+        egressRate: 2Gbit      # Guaranteed egress bandwidth floor of 2Gbps for outgoing tenant traffic
+        egressBurst: 16Mb      # Maximum burst buffer size allowed for high-priority outbound spikes
+        enableFqCodel: false
+
+      # KubeVirt Live Migration (VLAN 380)
+      - name: vlan-380-migration
+        classId: "1:380"
+        vlanId: 380
+        matchType: vlan         # L2 classification backend; matches 802.1Q VLAN tag 380 directly using cls_flower
+        priority: 3            # Lowest priority (prio 3); yields bandwidth to control plane (prio 0) and tenant traffic (prio 1)
+        egressRate: 10Gbit     # Full wire-speed egress ceiling; allows migration payload to burst up to 10Gbps when link is idle
+        egressBurst: 256Mb     # Large burst buffer to accommodate bursty live migration memory state sync
+        enableFqCodel: false
+---
+# Ingress Custom Resource: Bridge Link Ingress Traffic Isolation & Policing
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: flower-vlan-tc-ingress
+  namespace: openshift-vlan-tc-operator
+spec:
+  tcStrategy: flower           # Stateless Flower classifier strategy for ingress rate policing
+  reconcileIntervalSeconds: 60 # Node agent reconciliation interval
+  nodeSelector:
+    node-role.kubernetes.io/worker: "" # Targets all standard OpenShift worker nodes
+  htbRoot:
+    interface: br-vlan380      # Targets software bridge link to inspect demuxed VLAN 380 traffic after HW offload (rx-vlan-offload) strips 802.1Q tags on enp1s0
+    rate: 10Gbit               # Maximum line rate capacity for the bridge interface
+    htbId: 1                   # Major handle ID (1:) for the bridge HTB qdisc
+    defaultClassId: "1:99"     # Directs unclassified bridge traffic into class 1:99
+    defaultClassMinor: 99
+    classes:
+      # KubeVirt Live Migration Ingress Policing (VLAN 380)
+      - name: vlan-380-migration
+        classId: "1:380"
+        matchType: subnet       # L3 classification backend; matches demuxed IPv4 destination subnet on the software bridge
+        subnet: 10.0.238.0/24   # Migration subnet range delivering memory stream payloads
+        priority: 3            # Ingress filter evaluation priority (pref 3)
+        ingressRate: 10Gbit    # Maximum incoming bandwidth rate limit enforced via act_police
+        ingressBurst: 256Mb    # Generous burst window allowing high-speed migration transfers without premature packet drops
+        ingressAction: pass    # Monitor mode (conform-exceed pass); records telemetry byte counters (pref-3) on act_police without dropping migration frames
+        enableFqCodel: false
+```
+
+### VLAN Traffic Control CR with IFB tcStrategy - VLAN 380 defined as live migration vlan  
 
 ```yaml
 apiVersion: networking.med.io/v1alpha1
 kind: VlanTrafficControl
 metadata:
-  name: vlan-tc-workers
+  name: ifb-vlan-tc-combined
   namespace: openshift-vlan-tc-operator
 spec:
-  # Target specific worker nodes via label matching
   nodeSelector:
-    node-role.kubernetes.io/worker: ""
-  
-  # Tolerations allowing host agent execution on master/control-plane nodes
-  tolerations:
-    - key: "node-role.kubernetes.io/master"
-      operator: "Exists"
-      effect: "NoSchedule"
-    - key: "node-role.kubernetes.io/control-plane"
-      operator: "Exists"
-      effect: "NoSchedule"
-    - key: "node.kubernetes.io/unreachable"
-      operator: "Exists"
-      effect: "NoExecute"
-      tolerationSeconds: 600
-
-  reconcileIntervalSeconds: 60
-  tcStrategy: "flower"
+    node-role.kubernetes.io/worker: "" # Targets all standard OpenShift worker nodes in the cluster
+  tcStrategy: ifb               # Stateful Intermediate Functional Block strategy; uses act_mirred redirection to dynamically construct stateful HTB class trees on ingress for rate ceilings and bandwidth borrowing
   htbRoot:
-    interface: "enp1s0"
-    htbId: 1
-    rate: "10Gbit"
-    defaultClassId: "1:99"
+    interface: enp1s0           # Target physical host uplink interface (dynamically creates virtual netdevice 'ifb-enp1s0')
+    rate: 10Gbit                # Maximum physical wire speed capacity available to the root HTB qdisc (handle 1:)
+    defaultClassId: "1:99"      # Minor class ID handle where unclassified fallback traffic is routed
+    defaultClassMinor: 99
     classes:
-      # -----------------------------------------------------------------------
-      # 1. Standard 802.1Q Tagged VLAN Matching (matchType: vlan)
-      # Matches hardware 802.1Q tagged frames traversing the physical interface.
-      # -----------------------------------------------------------------------
-      - name: "storage-vlan-100"
-        matchType: "vlan"
-        vlanId: 100
+      # Default Control-Plane Fallback (etcd, API Server, Kubelet, Node Management)
+      - name: default-fallback
+        classId: "1:99"
+        priority: 0             # Absolute highest evaluation priority (prio 0); HTB processes these queues before any tenant or live migration queues
+        egressRate: 10Gbit      # Guaranteed egress bandwidth floor set to line rate; prevents host management traffic from ever bottlenecking
+        egressCeil: 10Gbit      # Outbound burst ceiling set to 10Gbps full wire speed
+        ingressRate: 10Gbit     # Guaranteed ingress bandwidth floor on IFB device set to line rate; ensures etcd/API ingress traffic is never artificially throttled
+        ingressCeil: 10Gbit     # Stateful IFB ingress burst ceiling set to 10Gbps full wire speed
+        enableFqCodel: true     # Enables Fair Queueing Controlled Delay AQM; isolates small etcd heartbeat flows and guarantees sub-millisecond latency [1]
+
+      # High Priority Workloads (VLAN 100)
+      - name: vlan-100-high-priority
         classId: "1:100"
-        priority: 1
-        egressRate: "50Mbit"
-        egressCeil: "10Gbit"
-        egressBurst: "15k"
-        ingressRate: "25Mbit"
-        ingressBurst: "50k"
-        ingressAction: "drop"
-        enableFqCodel: true
+        vlanId: 100
+        matchType: subnet        # L3 classification backend; matches destination IP subnet using cls_flower
+        subnet: 10.0.100.0/24    # Target IPv4 CIDR range for high-priority tenant workloads
+        priority: 1             # Priority 1 evaluation; served after control plane (prio 0) but before live migration streams (prio 3)
+        egressRate: 2Gbit       # Guaranteed egress bandwidth floor of 2Gbps for outgoing tenant traffic
+        egressCeil: 10Gbit       # Outbound burst ceiling; allows VLAN 100 to borrow up to 10Gbps line rate if higher priority classes are idle
+        ingressRate: 2Gbit      # Guaranteed ingress bandwidth floor of 2Gbps on virtual device 'ifb-enp1s0'
+        ingressCeil: 10Gbit      # Stateful IFB ingress ceiling; enables dynamic bandwidth borrowing up to 10Gbps during inbound traffic spikes
+        enableFqCodel: true     # Prevents bufferbloat and maintains low queuing latency across active tenant TCP flows [1]
 
-      # -----------------------------------------------------------------------
-      # 2. IP Subnet Matching (matchType: subnet)
-      # Essential for OpenShift Virtualization (KubeVirt) VM traffic where VLAN
-      # tags are stripped by OVS bridge before reaching the host network interface.
-      # -----------------------------------------------------------------------
-      - name: "kubevirt-subnet-untagged"
-        matchType: "subnet"
-        subnet: "10.200.0.0/24"
-        classId: "1:280"
-        priority: 2
-        egressRate: "200Mbit"
-        egressCeil: "200Mbit"
-        egressBurst: "30k"
-        ingressRate: "200Mbit"
-        ingressBurst: "30k"
-        ingressAction: "drop"
-        enableFqCodel: true
-
-      # -----------------------------------------------------------------------
-      # 3. Socket Buffer Mark Matching (matchType: mark)
-      # Matches traffic marked upstream by OVS, iptables, or nftables flows via cls_fw.
-      # -----------------------------------------------------------------------
-      - name: "ovs-marked-flow"
-        matchType: "mark"
-        mark: 16
+      # KubeVirt Live Migration (VLAN 380) - Dynamic Bi-Directional Bandwidth Borrowing
+      - name: vlan-380-migration
         classId: "1:380"
-        priority: 3
-        egressRate: "500Mbit"
-        egressCeil: "500Mbit"
-        egressBurst: "50k"
-        ingressRate: "100Mbit"
-        ingressBurst: "20k"
-        ingressAction: "drop"
-        enableFqCodel: true
+        vlanId: 380
+        matchType: vlan          # L2 classification backend; matches 802.1Q VLAN tag 380 directly using cls_flower
+        priority: 3             # Lowest evaluation priority (prio 3); automatically yields excess bandwidth to etcd (prio 0) and high-priority workloads (prio 1)
+        egressRate: 500Mbit     # Minimum guaranteed egress bandwidth floor of 500Mbps for live migration streams
+        egressCeil: 10Gbit      # Outbound burst ceiling; allows migration payload to borrow up to 10Gbps full wire speed when the uplink is unutilized
+        ingressRate: 500Mbit    # Minimum guaranteed ingress bandwidth floor of 500Mbps on IFB device
+        ingressCeil: 10Gbit     # Stateful IFB ingress ceiling; queue buffers allow inbound migration payload to borrow up to 10Gbps without dropping TCP packets
+        enableFqCodel: true     # Active Queue Management keeps migration TCP streams smooth and prevents packet drop-retransmit cycles under load [1]
 
-      # -----------------------------------------------------------------------
-      # 4. Automatic Classification Strategy Inference (matchType: auto)
-      # Automatically infers the classification protocol based on specified fields.
-      # -----------------------------------------------------------------------
-      - name: "auto-detect-vlan-400"
-        matchType: "auto"
-        vlanId: 400
-        classId: "1:400"
-        priority: 4
-        egressRate: "1Gbit"
-        egressCeil: "2Gbit"
-        ingressRate: "500Mbit"
-        ingressAction: "drop"
-        enableFqCodel: false
+# [1] FQ_CoDel (Fair Queueing Controlled Delay) active queue management combines two complementary techniques:
+#     - Fair Queueing (FQ): Distributes traffic into dynamic flow buckets to prevent bulk transfers from starving latency-sensitive control packets.
+#     - Controlled Delay (CoDel): Monitors buffer dwell time and drops packets if latency exceeds 5 ms, triggering TCP congestion control before queues bloat.
 ```
-
----
 
 ## VLAN Traffic Control & Bridge Architecture
 

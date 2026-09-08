@@ -1112,6 +1112,122 @@ oc debug node/hub-worker01.ocp4-hub.test.com -- \
   chroot /host tc monitor
 ```
 
+## Linux Traffic Control Architecture: Qdiscs, Classes, Filters, Actions & Leaves
+
+The ASCII diagram below illustrates the kernel object hierarchy and execution path across both **Egress (TX Bandwidth Shaping)** and **Ingress (RX Rate Policing)** pipelines:
+
+```text
+===================================================================================================
+1. EGRESS PIPELINE (TX Shaping: Qdiscs -> HTB Classes -> Classifiers -> Leaf AQM)
+===================================================================================================
+
+[ Host / Container / VM Socket Stream ]
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ ROOT QDISC (qdisc htb handle 1: root dev <interface>)                                           │
+│  └─ Attach Point for Egress Traffic Control Engine                                              │
+└─────────────────┬───────────────────────────────────────────────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ ROOT PARENT CLASS (class htb 1:1 root rate <link_speed>)                                        │
+│  └─ Enforces Total Physical Link Capacity Floor & Ceiling                                       │
+└─────────────────┬───────────────────────────────────────────────────────────────────────────────┘
+                  │
+                  ├─────────────────────────┬─────────────────────────┐
+                  ▼                         ▼                         ▼
+┌──────────────────────────┐┌──────────────────────────┐┌──────────────────────────┐
+│ CHILD CLASS (1:99)       ││ CHILD CLASS (1:100)      ││ CHILD CLASS (1:380)      │
+│  • prio 0                ││  • prio 1                ││  • prio 3                │
+│  • rate 10G / ceil 10G   ││  • rate 2G / ceil 10G    ││  • rate 500M / ceil 10G  │
+└────────────┬─────────────┘└────────────┬─────────────┘└────────────┬─────────────┘
+             │                           │                           │
+             ▼                           ▼                           ▼
+┌──────────────────────────┐┌──────────────────────────┐┌──────────────────────────┐
+│ CLASSIFIER / FILTER      ││ CLASSIFIER / FILTER      ││ CLASSIFIER / FILTER      │
+│  • tc filter ...         ││  • tc filter ...         ││  • tc filter ...         │
+│    protocol all prio 0   ││    protocol ip prio 1    ││    protocol 802.1q prio 3│
+│    flower default-catch  ││    flower dst_ip subnet  ││    flower vlan_id 380    │
+└────────────┬─────────────┘└────────────┬─────────────┘└────────────┬─────────────┘
+             │                           │                           │
+             ▼                           ▼                           ▼
+┌──────────────────────────┐┌──────────────────────────┐┌──────────────────────────┐
+│ LEAF QDISC (fq_codel)    ││ LEAF QDISC (fq_codel)    ││ LEAF QDISC (fq_codel)    │
+│  • qdisc fq_codel 10:    ││  • qdisc fq_codel 20:    ││  • qdisc fq_codel 30:    │
+│    parent 1:99           ││    parent 1:100          ││    parent 1:380          │
+│  • Flow hashing & AQM    ││  • Prevents bufferbloat  ││  • Smooth TCP pacing     │
+└────────────┬─────────────┘└────────────┬─────────────┘└────────────┬─────────────┘
+             │                           │                           │
+             └───────────────────────────┼───────────────────────────┘
+                                         │
+                                         ▼
+                             [ Physical NIC Wire (TX) ]
+
+
+===================================================================================================
+2. INGRESS PIPELINE (RX Policing: Ingress Qdisc -> Classifier -> Police Action)
+===================================================================================================
+
+[ Inbound Packets Arrive on Physical NIC Wire (RX) ]
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ INGRESS QDISC (qdisc ingress handle ffff: / clsact)                                            │
+│  └─ Hooks into Early Kernel RX Pipeline Prior to L3 Protocol Handling                           │
+└─────────────────┬───────────────────────────────────────────────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ CLASSIFIER / FILTER (cls_flower / cls_fw / cls_u32)                                            │
+│  └─ Matches 802.1Q VLAN Tags, IP Subnets, or SKB Marks (e.g., protocol ip flower dst_ip ...)   │
+└─────────────────┬───────────────────────────────────────────────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ ACTION ENGINE (act_police / act_mirred)                                                         │
+│                                                                                                 │
+│  ┌─────────────────────────┐     Exceeds Limit?     ┌────────────────────────────────────────┐  │
+│  │ Token Bucket Limiter    │ ─────────────────────► │ ACTION: HARD DROP (TC_ACT_SHOT)        │  │
+│  │ (ingressRate & Burst)   │                        │  └─ Dropped in kernel / driver silicon │  │
+│  └──────────┬──────────────┘                        └────────────────────────────────────────┘  │
+│             │                                                                                   │
+│             │ Within Rate / Pass Mode                                                           │
+│             ▼                                                                                   │
+│  ┌─────────────────────────┐   (Optional Redirect)  ┌────────────────────────────────────────┐  │
+│  │ ACTION: PASS/FORWARD    │ ─────────────────────► │ ACTION: REDIRECT (act_mirred)          │  │
+│  │ (TC_ACT_OK)             │                        │  └─ Redirects ingress stream to IFB    │  │
+│  └─────────────────────────┘                        └────────────────────────────────────────┘  │
+└─────────────────┬───────────────────────────────────────────────────────────────────────────────┘
+                  │
+                  ▼
+    [ To Host Network / Pod / VM Stack ]
+```
+
+---
+
+### Component Hierarchy & Structural Roles
+
+* **Qdisc (Queueing Discipline):**  
+  * **Root HTB Qdisc (`handle 1:`):** Attached to the top of an egress interface. Manages classful queueing and packet scheduling.
+  * **Ingress Qdisc (`handle ffff:` / `clsact`):** Attached to incoming traffic. Does not queue packets; acts as a hook point for stateless classifiers and policing actions.
+
+* **Classes (`htb class`):**  
+  * Organizes egress bandwidth into a hierarchical tree (`1:1` parent, `1:99`, `1:100`, `1:380` child classes).  
+  * Enforces guaranteed floors (`rate`), maximum ceilings (`ceil`), and evaluation priorities (`prio`).
+
+* **Classifiers / Filters (`tc filter`):**  
+  * Inspects packet headers using `cls_flower`, `cls_fw`, or `cls_u32` to classify frames by VLAN ID, IP CIDR, or SKB Mark.
+  * Steering mechanism that directs matched flows into specific HTB `classId` handles (on Egress) or `act_police` rate limiters (on Ingress).
+
+* **Actions (`act_police` / `act_mirred`):**  
+  * **`act_police`:** Enforces rate-limiting token buckets on ingress. Executes `TC_ACT_SHOT` (`drop`) when traffic exceeds `ingressRate` or `TC_ACT_OK` (`pass`) in monitor mode.
+  * **`act_mirred`:** Redirects raw ingress frames from physical interfaces into virtual `ifb-*` devices for stateful queue shaping.
+
+* **Leaf Qdiscs (`fq_codel`):**  
+  * Active Queue Management (AQM) leaf schedulers attached beneath child HTB classes.
+  * Hashes packet streams into separate buckets to prevent TCP bufferbloat and guarantee sub-millisecond latency for latency-sensitive flows (such as `etcd` heartbeats).
+
 ---
 
 ## Node Configuration & Alignment Engine

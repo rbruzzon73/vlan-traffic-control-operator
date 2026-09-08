@@ -2,18 +2,6 @@
 
 ---
 
-### ⚠️ Architecture Document Status: In Review
-*The architecture specification is undergoing updates following the implementation of:*
-
-- **Dual Traffic Control Strategies**
-  - Stateless Flower Policing (`tcStrategy: flower`)
-  - Stateful IFB Redirection (`tcStrategy: ifb`)
-- **Multi-CR Split Support**
-- **Parallel Reconciliation & Polling**
-- **Dual-Interface Telemetry Aggregation**
-
----
-
 # VLAN Traffic Control Operator
 
 - **VLAN Traffic Control Operator** delivers fine-grained, declarative Quality of Service (QoS), traffic policing, and bandwidth shaping for OpenShift and Kubernetes host interfaces.

@@ -754,12 +754,12 @@ On the egress path, `tcStrategy: flower` uses standard HTB class hierarchies for
 │            │                        │                          ┌───────────┴───────────┐                        │
 │            │                        │                       YES│                     NO│                        │
 │            │                        │                          ▼                       ▼                        │
-│            │                        │               ┌───────────────────┐   ┌─────────────────────────┐ │
-│            │                        │               │ Directs to        │   │ Fallback Class 1:99     │ │
-│            │                        │               │ Fallback 1:99     │   │ (Unclassified Egress)   │ │
-│            │                        │               └─────────┬─────────┘   └─────────────────────────┘ │
-│            │                        │                         │                                         │
-│            ▼                        ▼                         ▼                                         │
+│            │                        │               ┌───────────────────┐   ┌─────────────────────────┐         │
+│            │                        │               │ Directs to        │   │ Fallback Class 1:99     │         │
+│            │                        │               │ Fallback 1:99     │   │ (Unclassified Egress)   │         │
+│            │                        │               └─────────┬─────────┘   └─────────────────────────┘         │
+│            │                        │                         │                                                 │
+│            ▼                        ▼                         ▼                                                 │
 │   ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │
 │   │ HTB Egress Queue Execution & Transmission                                                                 │ │
 │   │                                                                                                           │ │
@@ -788,11 +788,11 @@ Stateless ingress rate limiting under Flower relies on kernel `act_police` token
  │                ▼                                                          │
  │   ┌───────────────────────┐                                               │
  │   │ Bucket Capacity       │ ◄─── BURST PARAMETER                          │
- │   │ (e.g., 64MB Buffer)   │      Allows transient line-rate (10G) bursts   │
+ │   │ (e.g., 64MB Buffer)   │      Allows transient line-rate (10G) bursts  │
  │   └───────────┬───────────┘      without packet loss.                     │
  │                │                                                          │
  │   Packets      │ Consume Tokens                                           │
- │   Pass ────────┼────────────────────────► Forwarded to VM / Migration      │
+ │   Pass ────────┼────────────────────────► Forwarded to VM / Migration     │
  │                │                                                          │
  │                │ Tokens Exhausted                                         │
  │                └────────────────────────► HARD DROP (Police Drop)         │
@@ -817,15 +817,21 @@ Stateless ingress rate limiting under Flower relies on kernel `act_police` token
 
 #### Live Migration Packet Path under `tcStrategy: flower`
 
-In split-CR or dual-interface configurations, `tcStrategy: flower` isolates migration traffic by shaping egress on the physical uplink (`enp1s0`) while policing ingress streams on the secondary bridge interface (`br-vlan380`) where hardware-stripped VLAN tags are demuxed:
+### Live Migration Bi-Directional Packet Path under `tcStrategy: flower`
+
+In split-CR or dual-interface configurations, `tcStrategy: flower` isolates migration traffic by shaping egress on physical uplinks (`enp1s0`) while policing ingress streams on secondary bridge interfaces (`br-vlan380`) where hardware-stripped VLAN tags are demuxed:
+
+#### 1. Forward Migration Stream (Memory Pages & VM State)
+
+Payload traffic originates from the source VM on `hub-worker01`, gets shaped by egress HTB classes on `enp1s0`, traverses the wire, and undergoes hardware tag stripping and ingress Flower policing on `br-vlan380` at `hub-worker02`:
 
 ```text
        SOURCE NODE: hub-worker01                                                DESTINATION NODE: hub-worker02
  ┌────────────────────────────────────┐                                ┌────────────────────────────────────┐
- │  Pod / VM (vm-vlan100 / migration) │                                │  Pod / VM (Target Instance)        │
+ │  Pod / VM (Source Instance)        │                                │  Pod / VM (Target Instance)        │
  └─────────────────┬──────────────────┘                                └─────────────────▲──────────────────┘
                    │                                                                     │
-                   │ (Outbound Migration Stream)                                         │ (Inbound Demuxed Stream)
+                   │ (Outbound Migration Payload)                                        │ (Inbound Post-Policed Stream)
                    ▼                                                                     │
  ┌────────────────────────────────────┐                                ┌─────────────────┴──────────────────┐
  │ PHYSICAL DEVICE: enp1s0            │                                │ BRIDGE DEVICE: br-vlan380          │
@@ -833,7 +839,6 @@ In split-CR or dual-interface configurations, `tcStrategy: flower` isolates migr
  │ [Point 1] Egress HTB Classes       │                                │ [Point 2] Ingress Flower Police    │
  │  └─► Class 1:380 (10G Ceil)        │                                │  └─► pref 3: subnet match + police │
  └─────────────────┬──────────────────┘                                └─────────────────▲──────────────────┘
-                   │                                                                     │
                    │                                                                     │ (Software Bridge Demux)
                    │                                                   ┌─────────────────┴──────────────────┐
                    │                                                   │ PHYSICAL DEVICE: enp1s0            │
@@ -843,6 +848,36 @@ In split-CR or dual-interface configurations, `tcStrategy: flower` isolates migr
                    │                                                                     │
                    │ ════════════════► FORWARD MIGRATION STREAM ══════════════════════►  │
                    │                    (Memory Pages & VM State)                        │
+                   └─────────────────────────────────────────────────────────────────────┘
+                                          (Physical Network / VLAN 380 Wire)
+```
+
+---
+
+#### 2. Return Control Flow (TCP ACKs & Synchronization)
+
+Return control traffic (TCP ACKs and protocol handshakes) originates at `hub-worker02`, exits through its egress HTB queues on `enp1s0`, and arrives at `hub-worker01` where ingress policing is enforced on its local bridge:
+
+```text
+       SOURCE NODE: hub-worker01                                                DESTINATION NODE: hub-worker02
+ ┌────────────────────────────────────┐                                ┌────────────────────────────────────┐
+ │  Pod / VM (Source Instance)        │                                │  Pod / VM (Target Instance)        │
+ └─────────────────▲──────────────────┘                                └─────────────────┬──────────────────┘
+                   │                                                                     │
+                   │ (Inbound Post-Policed ACKs)                                         │ (Outbound TCP ACKs / Control)
+                   │                                                                     ▼
+ ┌─────────────────┴──────────────────┐                                ┌────────────────────────────────────┐
+ │ BRIDGE DEVICE: br-vlan380          │                                │ PHYSICAL DEVICE: enp1s0            │
+ │                                    │                                │                                    │
+ │ [Point 4] Ingress Flower Police    │                                │ [Point 3] Egress HTB Classes       │
+ │  └─► pref 4: subnet match + police │                                │  └─► Class 1:380 (10G Ceil)        │
+ └─────────────────▲──────────────────┘                                └─────────────────┬──────────────────┘
+                   │ (Software Bridge Demux)                                             │
+ ┌─────────────────┴──────────────────┐                                                  │
+ │ PHYSICAL DEVICE: enp1s0            │                                                  │
+ │                                    │                                                  │
+ │ [HW Offload: Strips 802.1Q Tag]    │                                                  │
+ └─────────────────▲──────────────────┘                                                  │
                    │                                                                     │
                    │  ◄═══════════════ RETURN CONTROL FLOW ════════════════════════════  │
                    │                 (TCP ACKs & Protocol Handshakes)                    │
@@ -851,9 +886,10 @@ In split-CR or dual-interface configurations, `tcStrategy: flower` isolates migr
 ```
 
 #### Bi-Directional Migration Flow under Flower:
+
 1. **Outbound Egress (Source Node):** VM migration payloads leaving `hub-worker01` are classified into HTB class `1:380` on `enp1s0` [Point 1], allowing memory transfers to burst up to 10Gbps when link capacity is available.
-2. **Inbound Ingress (Destination Node):** When migration packets arrive on `hub-worker02` via physical link `enp1s0`, hardware offloading (`rx-vlan-offload`) strips the outer 802.1Q header. The frame passes untagged up to `br-vlan380`, where a Flower filter (`pref 3`) matches the IP subnet (`10.0.238.0/24`) [Point 2] and enforces the `act_police` token bucket without background host noise pollution.
-3. **Return Control Flow:** Return TCP ACKs generated by `hub-worker02` exit through its local physical interface (`enp1s0`) under HTB egress class `1:380` and arrive back at `hub-worker01`.
+2. **Inbound Ingress (Destination Node):** When migration packets arrive on `hub-worker02` via physical link `enp1s0`, hardware offloading (`rx-vlan-offload`) strips the outer 802.1Q header. The frame passes untagged up to `br-vlan380`, where a Flower filter (`pref 3`) matches the IP subnet (e.g., `10.0.238.0/24`) [Point 2] and enforces the `act_police` token bucket without background host noise pollution.
+3. **Return Control Flow:** Return TCP ACKs generated by `hub-worker02` exit through its physical uplink (`enp1s0` [Point 3]) under HTB egress class `1:380` and arrive back at `hub-worker01` where ingress policing is applied on the return interface [Point 4].
 
 ---
 

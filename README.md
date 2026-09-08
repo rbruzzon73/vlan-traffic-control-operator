@@ -859,7 +859,7 @@ Payload traffic originates from the source VM on `hub-worker01`, gets shaped by 
 Return control traffic (TCP ACKs and protocol handshakes) originates at `hub-worker02`, exits through its egress HTB queues on `enp1s0`, and arrives at `hub-worker01` where ingress policing is enforced on its local bridge:
 
 ```text
-       SOURCE NODE: hub-worker01                                                DESTINATION NODE: hub-worker02
+       SOURCE NODE: hub-worker01                                            DESTINATION NODE: hub-worker02
  ┌────────────────────────────────────┐                                ┌────────────────────────────────────┐
  │  Pod / VM (Source Instance)        │                                │  Pod / VM (Target Instance)        │
  └─────────────────▲──────────────────┘                                └─────────────────┬──────────────────┘

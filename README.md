@@ -170,6 +170,26 @@ Aggregates real-time netlink performance metrics across physical, virtual, and b
   
 ---
 
+## Configuration Flexibility Notice
+
+> **Configuration Flexibility Notice**  
+> All network parameters referenced throughout this documentation—including network interface identifiers (`enp1s0`, `br-vlan380`), HTB class handles (`classId: "1:100"`, `classId: "1:380"`), bandwidth allocations (`10Gbit`, `500Mbit`), and IPv4 ranges (`10.0.100.0/24`)—are **purely illustrative examples** derived from validation testbeds.  
+>  
+> The **VLAN Traffic Control Operator** contains **zero hardcoded network parameters**. Every configuration option is entirely declarative and dynamically parsed at runtime from the applied `VlanTrafficControl` Custom Resource (CR) specifications. Cluster administrators can customize all interface targets (e.g., physical NICs, Linux bonds, software bridges), class structures, rate limits, and subnets to match their specific cluster network topology and QoS requirements.
+
+---
+
+### Architectural Evidence: Dynamic Runtime Resolution
+
+The operator enforces complete configuration independence across all operational layers:
+
+* **Dynamic Network Interface Binding:** The execution engine parses target interfaces directly from `spec.htbRoot.interface` at runtime. Target links can be physical uplinks (`enp1s0`, `eth0`), aggregated bonds (`bond0`), or virtual bridge gateways (`br-vlan380`, `br-ex`).
+* **On-Demand IFB Provisioning:** When using `tcStrategy: ifb`, virtual Intermediate Functional Block devices are instantiated dynamically on the host and named on the fly using the format `ifb-<interface>` (e.g., `ifb-bond0`).
+* **Arbitrary Class Hierarchies:** Major handles (`htbId`), minor handles (`classId`), priorities (`prio`), and rate thresholds (`rate`, `ceil`, `burst`) are constructed programmatically from the CR spec, allowing arbitrary depth and class ID numbering schemes.
+* **Polymorphic Classification Matching:** Classifier filters accept arbitrary 802.1Q tags (`vlanId: 1–4094`), IPv4/IPv6 CIDR ranges (`subnet`), or SKB firewall marks (`mark`) without rigid compile-time defaults.
+* **Interface-Agnostic Telemetry API:** Telemetry REST endpoints (`/stats` and `/config`) dynamically query and aggregate netlink metrics for any host interface name passed via HTTP parameters.
+
+
 ## Component Interaction Summary
 
 ```text

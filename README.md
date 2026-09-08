@@ -899,8 +899,8 @@ The Flower architecture exposes netlink filter and qdisc performance counters vi
 
 | Measurement Point | TC Location & Qdisc | Exposed REST Endpoint & JSON Field | Collected Metrics & Telemetry Focus |
 | :--- | :--- | :--- | :--- |
-| **[Point 1]** | `enp1s0` / `sch_htb` | `/stats` $\rightarrow$ `.classStats[]` (`direction: egress`) | Physical outbound byte/packet counts, drops, overlimits, and HTB class borrowing statistics for egress class `1:380`. |
-| **[Point 2]** | `br-vlan380` / `clsact` | `/stats` $\rightarrow$ `.ingressStats[]` | Per-filter match byte counters, packet counts, and `act_police` drop/exceed counters for demuxed migration streams. |
+| **[Point 1] [Point 3]** | `enp1s0` / `sch_htb` | `/stats` $\rightarrow$ `.classStats[]` (`direction: egress`) | Physical outbound byte/packet counts, drops, overlimits, and HTB class borrowing statistics for egress class `1:380`. |
+| **[Point 2] [Point 4]** | `br-vlan380` / `clsact` | `/stats` $\rightarrow$ `.ingressStats[]` | Per-filter match byte counters, packet counts, and `act_police` drop/exceed counters for demuxed migration streams. |
 | **Filter Config** | `enp1s0` & `br-vlan380` | `/config` $\rightarrow$ `.actual.ingressFilters[]` | Reports configured filter priority (`pref 1`, `pref 3`), handle IDs, classification match criteria, and policing action (`drop` or `pass`). |
 
 ---

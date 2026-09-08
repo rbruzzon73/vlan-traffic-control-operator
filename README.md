@@ -80,7 +80,11 @@ cmd/
 ## Component Architecture & Module Reference
 
 ### Dynamic Interface Targeting
-The operator contains **zero hardcoded network interface names**. Every physical uplink, bridge, or virtual link target is dynamically resolved at runtime from the `spec.htbRoot.interface` field in the applied `VlanTrafficControl` Custom Resource (e.g., `enp1s0`, `eth0`, `bond0`, or secondary bridge devices like `br-vlan380`). When using `tcStrategy: ifb`, virtual IFB netdevices are dynamically created and named on the fly using the format `ifb-<interface>`.
+All network parameters referenced throughout this documentation—including network interface identifiers (`enp1s0`, `br-vlan380`), HTB class handles (`classId: "1:100"`, `classId: "1:380"`), bandwidth allocations (`10Gbit`, `500Mbit`), and IPv4 ranges (`10.0.100.0/24`), are **purely illustrative examples** derived from validation testbeds.   
+
+Every physical uplink, bridge, or virtual link target is dynamically resolved at runtime from the `spec.htbRoot.interface` field in the applied `VlanTrafficControl` Custom Resource (e.g., `enp1s0`, `eth0`, `bond0`, or secondary bridge devices like `br-vlan380`). When using `tcStrategy: ifb`, virtual IFB netdevices are dynamically created and named on the fly using the format `ifb-<interface>`.
+
+The **VLAN Traffic Control Operator** contains **zero hardcoded network parameters**. Every configuration option is entirely declarative and dynamically parsed at runtime from the applied `VlanTrafficControl` Custom Resource (CR) specifications. Cluster administrators can customize all interface targets (e.g., physical NICs, Linux bonds, software bridges), class structures, rate limits, and subnets to match their specific cluster network topology and QoS requirements.
 
 ---
 
@@ -168,14 +172,6 @@ Aggregates real-time netlink performance metrics across physical, virtual, and b
   * Isolates demuxed stream counters from untagged physical host noise (`pref-49152`).
   * Returns structured JSON telemetry payloads consumed by monitoring systems and validation pipelines.
   
----
-
-## Configuration Flexibility Notice
-
-- All network parameters referenced throughout this documentation—including network interface identifiers (`enp1s0`, `br-vlan380`), HTB class handles (`classId: "1:100"`, `classId: "1:380"`), bandwidth allocations (`10Gbit`, `500Mbit`), and IPv4 ranges (`10.0.100.0/24`)—are **purely illustrative examples** derived from validation testbeds.  
- 
-- The **VLAN Traffic Control Operator** contains **zero hardcoded network parameters**. Every configuration option is entirely declarative and dynamically parsed at runtime from the applied `VlanTrafficControl` Custom Resource (CR) specifications. Cluster administrators can customize all interface targets (e.g., physical NICs, Linux bonds, software bridges), class structures, rate limits, and subnets to match their specific cluster network topology and QoS requirements.
-
 ---
 
 ### Architectural Evidence: Dynamic Runtime Resolution

@@ -454,9 +454,223 @@ spec:
 #     - Controlled Delay (CoDel): Monitors buffer dwell time and drops packets if latency exceeds 5 ms, triggering TCP congestion control before queues bloat.
 ```
 
-## VLAN Traffic Control & Bridge Architecture
+---
+## Traffic Control & Telemetry Execution Matrices
 
-This section describes the Traffic Control (TC) configuration, CNI setup, and kernel-level packet flow for managing VM traffic on **VLAN 100** via `br-vlan100` and the host sub-interface `enp1s0.100`.
+The following matrices describe packet path mechanics, classification filter matching, and netlink telemetry counter sources across both ingress policing and egress bandwidth shaping modes.
+
+### 1. Ingress Traffic Matrix (Ingress / `ffff:`)
+
+| Strategy | Attachment Location | Monitored Ingress Interface | Hardware Offload (`rx-vlan-offload`) | Packet Header at TC Ingress | Rule / Filter Matching Behavior | Telemetry Counter Source |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Flower** | **Physical Link** (`enp1s0`) | `enp1s0` | **Enabled** (Default) | Untagged `ETH_P_IP` (`0x0800`) | Falls through to default `protocol ip` / `pref 49152` catch-all | Netlink Action Stats (`act_police` under `pref 49152`) |
+| **Flower** | **Physical Link** (`enp1s0`) | `enp1s0` | **Disabled** | Tagged `ETH_P_8021Q` (`0x8100`) | `protocol 802.1q vlan_id 380` | Netlink Action Stats (`act_police` under `pref 1`/`pref 3`) |
+| **Flower** | **Bridge Link** (`br-vlan380`) | `br-vlan380` | **N/A** (Software Bridge) | Demuxed per-VLAN stream | `protocol ip` + `dst_ip` subnet match | Netlink Action Stats (`act_police` on `br-vlan380`) |
+| **IFB** | **Physical Link** (`enp1s0`) $\rightarrow$ `ifb-enp1s0` | `ifb-enp1s0` | **Enabled / Disabled** | Redirected via `act_mirred` | `matchall` filter redirects all ingress frames to `ifb-enp1s0` | Netlink Class Stats (`sch_htb` classes `1:380` on `ifb-enp1s0`) |
+
+---
+
+### 2. Egress Traffic Matrix (Egress / `root x:`)
+
+> **Note:** `x` represents the root `htbId` (Hierarchical Token Bucket Identifier, major handle handle `x:`).
+
+| Strategy | Attachment Location | Monitored Egress Interface | Hardware Offload (`tx-vlan-offload`) | Packet Header at TC Egress | Rule / Filter Matching Behavior | Telemetry Counter Source |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Flower** | **Physical Link** (`enp1s0`) | `enp1s0` | **Enabled** (Default) | Untagged `ETH_P_IP` (Tag inserted by HW later) | HTB filter matching mark/skb priority or Class ID (`1:380`) | Netlink Class Stats (`sch_htb` class `1:380` on `enp1s0`) |
+| **Flower** | **Physical Link** (`enp1s0`) | `enp1s0` | **Disabled** | Tagged `ETH_P_8021Q` (`0x8100`) | `protocol 802.1q vlan_id 380` mapped to Class ID (`1:380`) | Netlink Class Stats (`sch_htb` class `1:380` on `enp1s0`) |
+| **IFB** | **Physical Link** (`enp1s0`) | `enp1s0` | **Enabled / Disabled** | Native Host Egress Stream | Direct HTB class hierarchy (`1:1` root parent, `1:380` leaf child) | Netlink Class Stats (`sch_htb` class `1:380` on `enp1s0`) |
+
+
+## VLAN Traffic Control Strategy and Architecture
+
+### IFB Architecture (Stateful HTB Queueing & Multi-Class Flow Logic)
+
+The Intermediate Functional Block (IFB) architecture provides stateful, bi-directional bandwidth management across host network interfaces. Standard Linux Traffic Control (`tc`) only supports classful queuing disciplines (`sch_htb`) on egress interfaces. To apply stateful class hierarchies, dynamic bandwidth borrowing, and buffer queueing to inbound traffic, the operator redirects physical ingress streams into a virtual netdevice (`ifb-<interface>`).
+
+---
+
+#### Ingress Packet Processing Pipeline
+
+The decision tree below details how inbound frames arriving on a physical port are redirected to the virtual IFB device, evaluated against priority-ordered `cls_flower` classifiers, and scheduled through HTB class queues before entering the host/pod network stack:
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                 │
+│   Inbound Packet Arrives at Physical Port                                                                       │
+│             │                                                                                                   │
+│             ▼                                                                                                   │
+│   ┌───────────────────────────────────────────────┐                                                             │
+│   │ Action: mirred redirect dev ifb-enp1s0        │                                                             │
+│   └──────────────────────┬────────────────────────┘                                                             │
+└──────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┘
+                           │
+                           ▼ Redirected into Intermediate Functional Block Device (ifb-enp1s0)
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ IFB Device Processing (ifb-enp1s0)                                                                              │
+│                                                                                                                 │
+│   ┌───────────────────────────────────────────────┐                                                             │
+│   │ Priority 1 Filter: Match VLAN 100 / Subnet?   │                                                             │
+│   └──────────────────────┬────────────────────────┘                                                             │
+│                          │                                                                                      │
+│             ┌────────────┴────────────┐                                                                         │
+│          YES│                       NO│                                                                         │
+│             ▼                         ▼                                                                         │
+│   ┌───────────────────┐   ┌───────────────────────────────────────────────┐                                     │
+│   │ Class 1:100       │   │ Priority 3 Filter: Match VLAN 380?            │                                     │
+│   │ (prio 1)          │   └───────────────────────┬───────────────────────┘                                     │
+│   └────────┬──────────┘                           │                                                             │
+│            │                          ┌───────────┴───────────┐                                                 │
+│            │                       YES│                     NO│                                                 │
+│            │                          ▼                       ▼                                                 │
+│            │               ┌───────────────────┐   ┌───────────────────────────────────────────────┐            │
+│            │               │ Class 1:380       │   │ Priority 49152 Filter: Match All (Fallback)?  │            │
+│            │               │ (prio 3)          │   └───────────────────────┬───────────────────────┘            │
+│            │               └────────┬──────────┘                           │                                    │
+│            │                        │                          ┌───────────┴───────────┐                        │
+│            │                        │                       YES│                     NO│                        │
+│            │                        │                          ▼                       ▼                        │
+│            │                        │               ┌───────────────────┐   ┌─────────────────────────┐ │
+│            │                        │               │ Class 1:99        │   │ Drop / Unmatched Kernel │ │
+│            │                        │               │ (prio 0 / etcd)   │   │ Exception               │ │
+│            │                        │               └─────────┬─────────┘   └─────────────────────────┘ │
+│            │                        │                         │                                         │
+│            ▼                        ▼                         ▼                                         │
+│   ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │
+│   │ Hierarchical Token Bucket (HTB) Engine & Active Queue Management                                          │ │
+│   │                                                                                                           │ │
+│   │   • Class 1:99  (prio 0): Min 10G, Ceil 10G + FQ_CoDel ──► First served, sub-ms latency (etcd/control)    │ │
+│   │   • Class 1:100 (prio 1): Min 2G,  Ceil 10G + FQ_CoDel ──► Guaranteed 2G, borrows idle bandwidth          │ │
+│   │   • Class 1:380 (prio 3): Min 500M, Ceil 10G + FQ_CoDel ──► Paced buffer queueing (prevents TCP drops)    │ │
+│   └──────────────────────────────────────────────────┬────────────────────────────────────────────────────────┘ │
+│                                                      │                                                          │
+│                                                      ▼                                                          │
+│                                             To Host / Pod / VM Stack                                            │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+---
+
+#### Egress Packet Processing Pipeline
+
+The following diagram details how outbound frames originated by local host services, Kubernetes pods, or virtual machines are classified, shaped through the Hierarchical Token Bucket (HTB) class tree, and scheduled onto the physical network wire (`enp1s0`):
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                 │
+│   Outbound Packet Generated by Host / Pod / VM Stack                                                            │
+│             │                                                                                                   │
+│             ▼                                                                                                   │
+│   ┌───────────────────────────────────────────────┐                                                             │
+│   │ Enters Physical / Uplink Interface (enp1s0)   │                                                             │
+│   └──────────────────────┬────────────────────────┘                                                             │
+└──────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┘
+                           │
+                           ▼ Root HTB Qdisc Classifier Evaluation (handle 1:)
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ Class Filter Matching (Priority Cascade)                                                                        │
+│                                                                                                                 │
+│   ┌───────────────────────────────────────────────┐                                                             │
+│   │ Priority 1 Filter: Match VLAN 100 / Subnet?   │                                                             │
+│   └──────────────────────┬────────────────────────┘                                                             │
+│                          │                                                                                      │
+│             ┌────────────┴────────────┐                                                                         │
+│          YES│                       NO│                                                                         │
+│             ▼                         ▼                                                                         │
+│   ┌───────────────────┐   ┌───────────────────────────────────────────────┐                                     │
+│   │ Class 1:100       │   │ Priority 3 Filter: Match VLAN 380 Tag / Subnet?│                                    │
+│   │ (prio 1)          │   └───────────────────────┬───────────────────────┘                                     │
+│   └────────┬──────────┘                           │                                                             │
+│            │                          ┌───────────┴───────────┐                                                 │
+│            │                       YES│                     NO│                                                 │
+│            │                          ▼                       ▼                                                 │
+│            │               ┌───────────────────┐   ┌───────────────────────────────────────────────┐            │
+│            │               │ Class 1:380       │   │ Priority 49152 Filter: Default Catch-All?     │            │
+│            │               │ (prio 3)          │   └───────────────────────┬───────────────────────┘            │
+│            │               └────────┬──────────┘                           │                                    │
+│            │                        │                          ┌───────────┴───────────┐                        │
+│            │                        │                       YES│                     NO│                        │
+│            │                        │                          ▼                       ▼                        │
+│            │                        │               ┌───────────────────┐   ┌─────────────────────────┐ │
+│            │                        │               │ Class 1:99        │   │ Direct Fallback Queue   │ │
+│            │                        │               │ (prio 0 / etcd)   │   │ (unclassified)          │ │
+│            │                        │               └─────────┬─────────┘   └─────────────────────────┘ │
+│            │                        │                         │                                         │
+│            ▼                        ▼                         ▼                                         │
+│   ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │
+│   │ Egress Hierarchical Token Bucket (HTB) Engine & Active Queue Management                                  │ │
+│   │                                                                                                           │ │
+│   │   • Class 1:99  (prio 0): Guaranteed Rate 10G, Ceil 10G ──► Pre-empts all traffic (sub-ms etcd/control)   │ │
+│   │   • Class 1:100 (prio 1): Guaranteed Rate 2G,  Ceil 10G ──► Tenant bandwidth floor, borrows idle capacity  │ │
+│   │   • Class 1:380 (prio 3): Guaranteed Rate 500M, Ceil 10G ──► Migration queue (yields under network load)   │ │
+│   └──────────────────────────────────────────────────┬────────────────────────────────────────────────────────┘ │
+│                                                      │                                                          │
+│                                                      ▼                                                          │
+│                                           Transmitted on Physical Wire                                          │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Live Migration Packet Path under `tcStrategy: ifb`
+
+During live migration events (e.g., KubeVirt VM transitions), traffic traverses both egress shaping and IFB ingress redirection loops across the source and destination worker nodes:
+
+```text
+    FROM SOURCE NODE: hub-worker01                                         TO  DESTINATION NODE: hub-worker02
+ ┌────────────────────────────────────┐                                ┌────────────────────────────────────┐
+ │  Pod / VM (vm-vlan100 / migration) │                                │  Pod / VM (Target Instance)        │
+ └─────────────────┬──────────────────┘                                └─────────────────▲──────────────────┘
+                   │                                                                     │
+                   │ (Outbound Migration Stream)                                         │ (Inbound Post-Shaped)
+                   ▼                                                                     │
+ ┌────────────────────────────────────┐                                ┌─────────────────┴──────────────────┐
+ │ VIRTUAL DEVICE: ifb-enp1s0         │                                │ VIRTUAL DEVICE: ifb-enp1s0         │
+ │                                    │                                │                                    │
+ │ [Point 3] Flower Classifier        │                                │ [Point 3] Flower Classifier        │
+ │  └─► pref 3: match vlan 380        │                                │  └─► pref 3: match vlan 380        │
+ │                                    │                                │                                    │
+ │ [Point 4] Ingress HTB Classes      │                                │ [Point 4] Ingress HTB Classes      │
+ │  └─► Class 1:380 (500Mbit)         │                                │  └─► Class 1:380 (500Mbit)         │
+ └─────────────────▲──────────────────┘                                └─────────────────▲──────────────────┘
+                   │                                                                     │
+                   │ (Redirect Ingress)                                                  │ (Redirect Ingress)
+ ┌─────────────────┴──────────────────┐                                ┌─────────────────┴──────────────────┐
+ │ PHYSICAL DEVICE: enp1s0            │                                │ PHYSICAL DEVICE: enp1s0            │
+ │                                    │                                │                                    │
+ │ [Point 1] Ingress Redirection      │                                │ [Point 1] Ingress Redirection      │
+ │  └─► matchall -> redirect ifb-enp1s0                                │  └─► matchall -> redirect ifb-enp1s0
+ │                                    │                                │                                    │
+ │ [Point 2] Egress HTB Classes       │                                │ [Point 2] Egress HTB Classes       │
+ │  └─► Class 1:380 (500Mbit Limit)   │                                │  └─► Class 1:380 (500Mbit Limit)   │
+ └─────────────────┬──────────────────┘                                └─────────────────▲──────────────────┘
+                   │                                                                     │
+                   │                                                                     │
+                   └───────────────────────────────► LIVE MIGRATION ─────────────────────┘
+				                           (Physical Network / VLAN 380 Wire)
+```
+
+#### Bi-Directional Flow Mechanics & Reverse Path Shaping
+
+* **Forward Stream (Source to Destination):**
+  1. **Source Egress Shaping:** Outbound VM memory payloads are classified on `hub-worker01` via `enp1s0` class `1:380` [Point 2], constraining outbound bandwidth according to `egressRate` and `egressCeil`.
+  2. **Destination Ingress Shaping:** Arriving frames on `hub-worker02` are caught by the `matchall` rule on `enp1s0` [Point 1] and redirected to `ifb-enp1s0`. They are matched by `cls_flower` [Point 3] and scheduled through IFB class `1:380` [Point 4] before entering the target VM instance.
+
+* **Return Control Flow (Destination to Source):**
+  1. **Destination Egress Shaping:** TCP ACKs, window updates, and synchronization handshakes generated by the destination node (`hub-worker02`) exit back through its physical uplink `enp1s0` [Point 2]. These return packets are evaluated under the destination's local egress HTB tree (`class 1:380`).
+  2. **Source Ingress Shaping:** As return ACKs arrive at `hub-worker01`, they enter the physical port `enp1s0` [Point 1], get redirected via `act_mirred` to `ifb-enp1s0`, and pass through the source node's ingress HTB queue hierarchy [Point 4].
+  3. **ACK Pre-emption via `fq_codel`:** Because return flow TCP ACKs are small packets, enabling `enableFqCodel: true` ensures that returning ACKs bypass queued bulk migration blocks without delay, preventing artificial sender window throttling and maintaining maximal TCP throughput across the migration pipeline.
+
+---
+
+#### Telemetry Measurement Points & Netlink Metrics
+
+The operator captures statistics at four discrete points along the physical and virtual packet paths, exposing them via the REST API endpoints (`/config` and `/stats`):
+
+| Measurement Point | TC Location & Qdisc | Exposed REST Endpoint & JSON Field | Collected Metrics & Telemetry Focus |
+| :--- | :--- | :--- | :--- |
+| **[Point 1]** | `enp1s0` / `clsact` | `/config` $\rightarrow$ `.actual.ingressFilters[]` | Action parameters (`mirred redirect dev ifb-enp1s0`), filter priority, handle ID, and attachment interface. |
+| **[Point 2]** | `enp1s0` / `sch_htb` | `/stats` $\rightarrow$ `.classStats[]` (`direction: egress`) | Physical outbound byte/packet counts, drops, rate overlimits, and HTB class borrowing statistics on `enp1s0`. |
+| **[Point 3]** | `ifb-enp1s0` / `cls_flower` | `/stats` $\rightarrow$ `.ingressStats[]` | Per-filter classification match counters (bytes, packets, drops) associated with VLAN 380 rules on `ifb-enp1s0`. |
+| **[Point 4]** | `ifb-enp1s0` / `sch_htb` | `/stats` $\rightarrow$ `.classStats[]` (`direction: ingress`) | Stateful inbound byte/packet counters, drops, overlimits, and borrowing statistics on the `ifb-enp1s0` device. |
 
 ---
 

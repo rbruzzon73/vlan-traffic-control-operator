@@ -532,12 +532,12 @@ The decision tree below details how inbound frames arriving on a physical port a
 │            │                        │                          ┌───────────┴───────────┐                        │
 │            │                        │                       YES│                     NO│                        │
 │            │                        │                          ▼                       ▼                        │
-│            │                        │               ┌───────────────────┐   ┌─────────────────────────┐ │
-│            │                        │               │ Class 1:99        │   │ Drop / Unmatched Kernel │ │
-│            │                        │               │ (prio 0 / etcd)   │   │ Exception               │ │
-│            │                        │               └─────────┬─────────┘   └─────────────────────────┘ │
-│            │                        │                         │                                         │
-│            ▼                        ▼                         ▼                                         │
+│            │                        │               ┌───────────────────┐   ┌─────────────────────────┐         │
+│            │                        │               │ Class 1:99        │   │ Drop / Unmatched Kernel │         │
+│            │                        │               │ (prio 0 / etcd)   │   │ Exception               │         │
+│            │                        │               └─────────┬─────────┘   └─────────────────────────┘         │
+│            │                        │                         │                                                 │
+│            ▼                        ▼                         ▼                                                 │
 │   ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │
 │   │ Hierarchical Token Bucket (HTB) Engine & Active Queue Management                                          │ │
 │   │                                                                                                           │ │
@@ -592,18 +592,18 @@ The following diagram details how outbound frames originated by local host servi
 │            │                        │                          ┌───────────┴───────────┐                        │
 │            │                        │                       YES│                     NO│                        │
 │            │                        │                          ▼                       ▼                        │
-│            │                        │               ┌───────────────────┐   ┌─────────────────────────┐ │
-│            │                        │               │ Class 1:99        │   │ Direct Fallback Queue   │ │
-│            │                        │               │ (prio 0 / etcd)   │   │ (unclassified)          │ │
-│            │                        │               └─────────┬─────────┘   └─────────────────────────┘ │
-│            │                        │                         │                                         │
-│            ▼                        ▼                         ▼                                         │
+│            │                        │               ┌───────────────────┐   ┌─────────────────────────┐         │
+│            │                        │               │ Class 1:99        │   │ Direct Fallback Queue   │         │
+│            │                        │               │ (prio 0 / etcd)   │   │ (unclassified)          │         │
+│            │                        │               └─────────┬─────────┘   └─────────────────────────┘         │
+│            │                        │                         │                                                 │
+│            ▼                        ▼                         ▼                                                 │
 │   ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │
-│   │ Egress Hierarchical Token Bucket (HTB) Engine & Active Queue Management                                  │ │
+│   │ Egress Hierarchical Token Bucket (HTB) Engine & Active Queue Management                                   │ │
 │   │                                                                                                           │ │
 │   │   • Class 1:99  (prio 0): Guaranteed Rate 10G, Ceil 10G ──► Pre-empts all traffic (sub-ms etcd/control)   │ │
-│   │   • Class 1:100 (prio 1): Guaranteed Rate 2G,  Ceil 10G ──► Tenant bandwidth floor, borrows idle capacity  │ │
-│   │   • Class 1:380 (prio 3): Guaranteed Rate 500M, Ceil 10G ──► Migration queue (yields under network load)   │ │
+│   │   • Class 1:100 (prio 1): Guaranteed Rate 2G,  Ceil 10G ──► Tenant bandwidth floor, borrows idle capacity │ │
+│   │   • Class 1:380 (prio 3): Guaranteed Rate 500M, Ceil 10G ──► Migration queue (yields under network load)  │ │
 │   └──────────────────────────────────────────────────┬────────────────────────────────────────────────────────┘ │
 │                                                      │                                                          │
 │                                                      ▼                                                          │

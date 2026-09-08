@@ -172,10 +172,9 @@ Aggregates real-time netlink performance metrics across physical, virtual, and b
 
 ## Configuration Flexibility Notice
 
-> **Configuration Flexibility Notice**  
-> All network parameters referenced throughout this documentation—including network interface identifiers (`enp1s0`, `br-vlan380`), HTB class handles (`classId: "1:100"`, `classId: "1:380"`), bandwidth allocations (`10Gbit`, `500Mbit`), and IPv4 ranges (`10.0.100.0/24`)—are **purely illustrative examples** derived from validation testbeds.  
->  
-> The **VLAN Traffic Control Operator** contains **zero hardcoded network parameters**. Every configuration option is entirely declarative and dynamically parsed at runtime from the applied `VlanTrafficControl` Custom Resource (CR) specifications. Cluster administrators can customize all interface targets (e.g., physical NICs, Linux bonds, software bridges), class structures, rate limits, and subnets to match their specific cluster network topology and QoS requirements.
+- All network parameters referenced throughout this documentation—including network interface identifiers (`enp1s0`, `br-vlan380`), HTB class handles (`classId: "1:100"`, `classId: "1:380"`), bandwidth allocations (`10Gbit`, `500Mbit`), and IPv4 ranges (`10.0.100.0/24`)—are **purely illustrative examples** derived from validation testbeds.  
+ 
+- The **VLAN Traffic Control Operator** contains **zero hardcoded network parameters**. Every configuration option is entirely declarative and dynamically parsed at runtime from the applied `VlanTrafficControl` Custom Resource (CR) specifications. Cluster administrators can customize all interface targets (e.g., physical NICs, Linux bonds, software bridges), class structures, rate limits, and subnets to match their specific cluster network topology and QoS requirements.
 
 ---
 

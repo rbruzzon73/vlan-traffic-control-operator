@@ -1,0 +1,26 @@
+name: Cleanup All Package Images
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+jobs:
+  clean-packages:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package:
+          - 'vlan-traffic-control-agent'
+          - 'vlan-traffic-control-catalog'
+          - 'vlan-traffic-control-operator'
+          - 'vlan-traffic-control-bundle'
+          - 'vlan-traffic-control-manager'
+    steps:
+      - name: Delete old container versions
+        uses: actions/delete-package-versions@v5
+        with:
+          token: ${{ secrets.PACKAGE_DELETE_TOKEN }}
+          package-name: ${{ matrix.package }}
+          package-type: 'container'
+          min-versions-to-keep: 20

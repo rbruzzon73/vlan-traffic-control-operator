@@ -9,7 +9,8 @@
 
 ---
 
-### 2. Egress Traffic Matrix (Egress / `root 1:`)
+### 2. Egress Traffic Matrix (Egress / `root x:`)
+**Note:** x is the htbId (Hierarchical Token Bucket Identifier)
 
 | Strategy | Attachment Location | Monitored Egress Interface | Hardware Offload (`tx-vlan-offload`) | Packet Header at TC Egress | Rule / Filter Matching Behavior | Telemetry Counter Source |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |

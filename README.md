@@ -80,7 +80,7 @@ cmd/
 ## Component Architecture & Module Reference
 
 ### Dynamic Interface Targeting
-All network parameters referenced throughout this documentation—including network interface identifiers (`enp1s0`, `br-vlan380`), HTB class handles (`classId: "1:100"`, `classId: "1:380"`), bandwidth allocations (`10Gbit`, `500Mbit`), and IPv4 ranges (`10.0.100.0/24`), are **purely illustrative examples** derived from validation testbeds.   
+All network parameters referenced throughout this documentation, including network interface identifiers (`enp1s0`, `br-vlan380`), HTB class handles (`classId: "1:100"`, `classId: "1:380"`), bandwidth allocations (`10Gbit`, `500Mbit`), and IPv4 ranges (`10.0.100.0/24`), are **purely illustrative examples** derived from validation testbeds.   
 
 Every physical uplink, bridge, or virtual link target is dynamically resolved at runtime from the `spec.htbRoot.interface` field in the applied `VlanTrafficControl` Custom Resource (e.g., `enp1s0`, `eth0`, `bond0`, or secondary bridge devices like `br-vlan380`). When using `tcStrategy: ifb`, virtual IFB netdevices are dynamically created and named on the fly using the format `ifb-<interface>`.
 
@@ -93,8 +93,8 @@ The Controller Manager is the orchestrator running at the cluster control-plane 
 
 * **Scope:** Cluster-wide control plane component.
 * **Responsibilities:**
-  * **CRD Watching:** Watches `Create`, `Update`, and `Delete` lifecycle events on `VlanTrafficControl` CRs (`networking.med.io/v1alpha1`).
-  * **Split-CR Support:** Processes single unified manifests or split CR configurations (e.g., dedicated egress on a physical interface and dedicated ingress on a secondary bridge interface).
+  * **CRD Watching:** `Watches` `Create`, `Update`, and `Delete` lifecycle events on `VlanTrafficControl` CRs (`networking.med.io/v1alpha1`).
+  * **Split-CR Support:** Processes single unified manifests or split CR configurations (e.g., dedicated egress on a physical interface and dedicated ingress on secondary bridge interfaces).
   * **Node Targeting (`pkg/executor/node_filter.go`):** Evaluates `nodeSelector` fields against cluster nodes to target policy application.
   * **Parallel Agent Orchestration:** Triggers parallel `/reconcile` and `/cleanup` HTTP invocations across target Node Agents to minimize alignment latency.
   * **Status Aggregation:** Collects health and reconciliation status from node agents and updates the `.status` subresource of the `VlanTrafficControl` CR.
@@ -138,7 +138,7 @@ Builds and manages egress HTB bandwidth hierarchies on arbitrary target physical
 
 * **Scope:** Internal package used by `cmd/agent`.
 * **Responsibilities:**
-  * Configures the root HTB qdisc (`handle 1:`) and parent class (`1:1`) on the interface specified in `spec.htbRoot.interface`.
+  * Configures the root HTB qdisc (e.g.: `handle 1:`) and parent class (e.g.: `1:1`) on the interface specified in `spec.htbRoot.interface`.
   * Establishes default fallback classes (e.g., `1:99`) for non-classified host traffic.
   * Instantiates child traffic classes (e.g., `1:100`, `1:380`) specifying `rate`, `ceil`, `burst`, and `priority`.
   * Optionally attaches `fq_codel` AQM leaf qdiscs to child classes.
@@ -178,7 +178,7 @@ Aggregates real-time netlink performance metrics across physical, virtual, and b
 
 The operator enforces complete configuration independence across all operational layers:
 
-* **Dynamic Network Interface Binding:** The execution engine parses target interfaces directly from `spec.htbRoot.interface` at runtime. Target links can be physical uplinks (`enp1s0`, `eth0`), aggregated bonds (`bond0`), or virtual bridge gateways (`br-vlan380`, `br-ex`).
+* **Dynamic Network Interface Binding:** The execution engine parses target interfaces directly from `spec.htbRoot.interface` at runtime. Target links can be physical uplinks (e.g.: `enp1s0`, `eth0`), aggregated bonds (e.g.: `bond0`), or virtual bridge gateways (e.g.: `br-vlan380`, `br-ex`).
 * **On-Demand IFB Provisioning:** When using `tcStrategy: ifb`, virtual Intermediate Functional Block devices are instantiated dynamically on the host and named on the fly using the format `ifb-<interface>` (e.g., `ifb-bond0`).
 * **Arbitrary Class Hierarchies:** Major handles (`htbId`), minor handles (`classId`), priorities (`prio`), and rate thresholds (`rate`, `ceil`, `burst`) are constructed programmatically from the CR spec, allowing arbitrary depth and class ID numbering schemes.
 * **Polymorphic Classification Matching:** Classifier filters accept arbitrary 802.1Q tags (`vlanId: 1–4094`), IPv4/IPv6 CIDR ranges (`subnet`), or SKB firewall marks (`mark`) without rigid compile-time defaults.

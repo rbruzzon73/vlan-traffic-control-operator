@@ -317,7 +317,7 @@ When `matchType: auto` is specified (or if `matchType` is omitted), the operator
 
 ## Full Manifest Example
 
-### VLAN Traffic Control CR with Flower tcStrategy - VLAN 380 defined as live migration vlan  
+### VLAN Traffic Control CR with Flower tcStrategy - VLAN 380 defined as Live Migration Network in Red Hat OpenShift Virtualization  
 
 ```yaml
 # Egress Custom Resource: Physical Link Egress Bandwidth Shaping
@@ -396,7 +396,7 @@ spec:
         enableFqCodel: false
 ```
 
-### VLAN Traffic Control CR with IFB tcStrategy - VLAN 380 defined as live migration vlan  
+### VLAN Traffic Control CR with IFB tcStrategy - VLAN 380 defined as Live Migration Network in Red Hat OpenShift Virtualization  
 
 ```yaml
 apiVersion: networking.med.io/v1alpha1

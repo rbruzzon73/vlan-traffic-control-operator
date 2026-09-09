@@ -466,10 +466,69 @@ The following matrices describe packet path mechanics, classification filter mat
 
 | Strategy | Attachment Location | Monitored Ingress Interface | Hardware Offload (`rx-vlan-offload`) | Packet Header at TC Ingress | Rule / Filter Matching Behavior | Telemetry Counter Source |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Flower** | **Physical Link** (`enp1s0`) | `enp1s0` | **Enabled** (Default) | Untagged `ETH_P_IP` (`0x0800`) | Falls through to default `protocol ip` / `pref 49152` catch-all | Netlink Action Stats (`act_police` under `pref 49152`) |
+| **Flower** | **Physical Link** (`enp1s0`) | `enp1s0` | **Enabled** (Default [1]) | Untagged `ETH_P_IP` (`0x0800`) | Falls through to default `protocol ip` / `pref 49152` catch-all | Netlink Action Stats (`act_police` under `pref 49152`) |
 | **Flower** | **Physical Link** (`enp1s0`) | `enp1s0` | **Disabled** | Tagged `ETH_P_8021Q` (`0x8100`) | `protocol 802.1q vlan_id 380` | Netlink Action Stats (`act_police` under `pref 1`/`pref 3`) |
 | **Flower** | **Bridge Link** (`br-vlan380`) | `br-vlan380` | **N/A** (Software Bridge) | Demuxed per-VLAN stream | `protocol ip` + `dst_ip` subnet match | Netlink Action Stats (`act_police` on `br-vlan380`) |
 | **IFB** | **Physical Link** (`enp1s0`) $\rightarrow$ `ifb-enp1s0` | `ifb-enp1s0` | **Enabled / Disabled** | Redirected via `act_mirred` | `matchall` filter redirects all ingress frames to `ifb-enp1s0` | Netlink Class Stats (`sch_htb` classes `1:380` on `ifb-enp1s0`) |
+
+The VLAN Traffic Control (VTC) Operator configures Traffic Control (TC) rules on host interfaces using **Default (Auto / Best-Effort) Mode**. 
+In this mode, no explicit `skip_sw` or `skip_hw` flags are enforced, allowing the Linux kernel to automatically balance software reliability with hardware acceleration.
+
+```bash
+
+[ Operator applies TC Filter ]
+                   (No skip_sw / skip_hw flags)
+                                │
+                                ▼
+               ┌─────────────────────────────────┐
+               │  Linux Kernel Network Stack     │
+               │  (clsact / ingress qdisc)       │
+               └────────────────┬────────────────┘
+                                │
+               ┌────────────────┴────────────────┐
+               │  1. Installs Rule in Software   │
+               │     (Kernel CPU Space: in_sw)   │
+               └────────────────┬────────────────┘
+                                │
+                                ▼
+                   Does Driver / NIC support 
+                   TC Flower Offloading?
+                                │
+            ┌───────────────────┴───────────────────┐
+            │ YES                                   │ NO / Unsupported
+            ▼                                       ▼
+  ┌───────────────────┐                   ┌───────────────────┐
+  │ Offload to ASIC   │                   │ Software Fallback │
+  │ Driver Attempts   │                   │ (Silent Failover) │
+  └─────────┬─────────┘                   └─────────┬─────────┘
+            │                                       │
+     Accepted by NIC?                               │
+      ┌─────┴─────┐                                 │
+  YES │           │ NO                              │
+      ▼           ▼                                 │
+┌───────────┐ ┌───────────┐                         │
+│ Set Flag: │ │ Set Flag: │                         │
+│  in_hw    │ │ not_in_hw │                         │
+└─────┬─────┘ └─────┬─────┘                         │
+      │             └───────────────────────────────┤
+      ▼                                             ▼
+┌─────────────────────────┐             ┌─────────────────────────┐
+│ Hardware Acceleration   │             │ Pure Software Execution │
+│ • ASIC-level processing │             │ • Kernel CPU processing │
+│ • HW counter sync to tc │             │ • Standard netlink tc   │
+└─────────────────────────┘             └─────────────────────────┘
+
+```
+
+When a `VlanTrafficControl` resource is applied, the operator issues netlink calls to program the `clsact` / `ingress` qdisc on the physical interface. 
+The kernel processes the rule through a dual-path pipeline:
+
+1. **Software Baseline (`in_sw`)**: The rule is immediately installed in host kernel CPU space (`in_sw`). This guarantees that packet classification, IFB redirection, and telemetry collection function on all hardware types.
+2. **Best-Effort Acceleration (`in_hw`)**: The kernel attempts to offload a copy of the filter to the physical Network Interface Card (NIC).
+   * **Supported SmartNICs**: If the NIC and driver (e.g., Mellanox ConnectX or Intel E810 in `switchdev` mode) support TC Flower offloading, the rule is loaded directly into the ASIC hardware (`in_hw`). Packet counters are periodically synced back to `tc` for monitoring.
+   * **Unsupported / Software Devices**: If the NIC does not support hardware offloading—or if the rule targets a software-only device such as `ifb` or a standard Linux bridge—the kernel sets the `not_in_hw` status flag and falls back to software processing. No errors are raised, and traffic remains uninterrupted.
+
+
 
 ---
 

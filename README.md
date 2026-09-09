@@ -476,7 +476,7 @@ In this mode, no explicit `skip_sw` or `skip_hw` flags are enforced, allowing th
 
 ```bash
 
-[ Operator applies TC Filter ]
+                  [ Operator applies TC Filter ]
                    (No skip_sw / skip_hw flags)
                                 │
                                 ▼

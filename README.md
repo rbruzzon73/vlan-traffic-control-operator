@@ -1576,7 +1576,7 @@ metadata:
 spec:
   displayName: Community
   sourceType: grpc
-  image: ghcr.io/rbruzzon73/vlan-traffic-control-catalog:v0.3.83
+  image: ghcr.io/rbruzzon73/vlan-traffic-control-catalog:v0.3.94
   updateStrategy:
     registryPoll:
       interval: 30m

@@ -35,7 +35,6 @@ func init() {
 	_ = networkingv1alpha1.AddToScheme(scheme)
 }
 
-// Response payload format for multi-interface node sweep (GET /stats without params)
 type NodeMultiInterfaceStatsResponse struct {
 	Node       string                              `json:"node"`
 	Interfaces []networkingv1alpha1.InterfaceStats `json:"interfaces"`
@@ -54,18 +53,14 @@ func main() {
 	}
 
 	log := zapr.NewLogger(zapLog).WithValues("nodeName", nodeName)
-
 	log.Info("=== Starting VLAN Traffic Control Agent ===", "pid", os.Getpid())
 
-	// 1. Ensure Kernel Modules are loaded
-	log.Info("[BOOT] Verifying kernel modules (sch_htb, cls_flower, act_police, ifb)...")
 	if err := executor.EnsureKernelModulesLoaded("auto", log); err != nil {
 		log.Error(err, "[BOOT] Warning/Error ensuring kernel modules on host node")
 	} else {
 		log.Info("[BOOT] Kernel modules verified successfully")
 	}
 
-	// 2. Initialize Kubernetes client
 	config, err := ctrl.GetConfig()
 	if err != nil {
 		log.Error(err, "[INIT] Failed to get Kubernetes in-cluster config")
@@ -78,7 +73,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. HTTP /stats Handler
+	// 1. HTTP /stats Handler
 	http.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		rawIfaceParam := query.Get("interface")
@@ -91,14 +86,11 @@ func main() {
 		}
 		targetClassID := query.Get("classId")
 
-		log.Info("[API] GET /stats", "clientIP", r.RemoteAddr, "interfaceParam", ifaceParam, "classNameParam", classNameParam, "targetVlan", targetVlan, "targetClassID", targetClassID)
-
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
 		hostNode := getHostNode(ctx, k8sClient, nodeName, log)
 
-		// Dynamic discovery of Class Names and Default Class Handles per targeting CR
 		classMap := make(map[string]string)
 		defaultClassHandles := make(map[string]bool)
 
@@ -144,7 +136,6 @@ func main() {
 				st, errStats := executor.GetInterfaceStatsFiltered(iface, classMap, targetVlan, targetClassID)
 				if errStats == nil && st != nil {
 					st.Node = nodeName
-
 					if classNameParam != "" {
 						filteredClasses := make([]networkingv1alpha1.ClassStat, 0)
 						for _, cs := range st.ClassStats {
@@ -161,7 +152,6 @@ func main() {
 				}
 			}
 
-			log.Info("[API] GET /stats (generic) completed", "totalActiveInterfaces", len(allStats))
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(NodeMultiInterfaceStatsResponse{
 				Node:       nodeName,
@@ -178,7 +168,6 @@ func main() {
 
 		stats, errStats := executor.GetInterfaceStatsFiltered(ifaceParam, classMap, targetVlan, targetClassID)
 		if errStats != nil {
-			log.Error(errStats, "[API] Failed retrieving Netlink stats", "interface", ifaceParam)
 			http.Error(w, fmt.Sprintf("failed retrieving stats: %v", errStats), http.StatusInternalServerError)
 			return
 		}
@@ -197,37 +186,48 @@ func main() {
 			stats.IngressStats = make([]networkingv1alpha1.IngressStat, 0)
 		}
 
-		log.Info("[API] GET /stats completed",
-			"interface", ifaceParam,
-			"classesFound", len(stats.ClassStats),
-			"ingressRulesFound", len(stats.IngressStats),
-		)
-
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(stats)
 	})
 
-	// 4. HTTP /cleanup Handler
+	// 2. HTTP /cleanup Handler
 	http.HandleFunc("/cleanup", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete && r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		iface := r.URL.Query().Get("interface")
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		iface := strings.TrimSpace(r.URL.Query().Get("interface"))
+
+		// If interface parameter is missing, dynamically resolve from active CRs targeting this node
 		if iface == "" {
-			iface = "enp1s0"
+			hostNode := getHostNode(ctx, k8sClient, nodeName, log)
+			var list networkingv1alpha1.VlanTrafficControlList
+			if err := k8sClient.List(ctx, &list); err == nil {
+				for _, item := range list.Items {
+					if isPolicyTargetingNode(hostNode, nodeName, &item, log) && item.Spec.HtbRoot.Interface != "" {
+						iface = item.Spec.HtbRoot.Interface
+						break
+					}
+				}
+			}
 		}
 
-		log.Info("========================================================================")
-		log.Info("[CLEANUP] Starting host TC rule cleanup...", "interface", iface, "triggeredBy", r.RemoteAddr)
-
-		errCleanup := executor.FlushInterface(iface)
-		if errCleanup != nil {
-			log.Error(errCleanup, "[CLEANUP] Error during interface flush", "interface", iface)
-		} else {
-			log.Info("[CLEANUP] Interface successfully flushed (root & ingress qdiscs removed)", "interface", iface)
+		if iface == "" {
+			discovered := discoverActiveTcInterfaces(log)
+			if len(discovered) > 0 {
+				iface = discovered[0]
+			} else {
+				iface = "enp1s0" // Emergency fallback if host discovery fails
+			}
 		}
+
+		log.Info("[CLEANUP] Starting host TC rule cleanup...", "interface", iface)
+
+		_ = executor.FlushInterface(iface)
 
 		ifbName := fmt.Sprintf("ifb-%s", iface)
 		if len(ifbName) > 15 {
@@ -239,9 +239,6 @@ func main() {
 		if errIfbDel := deleteIfbCmd.Run(); errIfbDel != nil {
 			_ = exec.Command("ip", "link", "delete", ifbName, "type", "ifb").Run()
 		}
-		log.Info("[CLEANUP] IFB virtual device interface deleted from host kernel", "ifbInterface", ifbName)
-
-		log.Info("========================================================================")
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -252,14 +249,12 @@ func main() {
 		})
 	})
 
-	// 5. HTTP /reconcile Handler with 5s timeout safeguard
+	// 3. HTTP /reconcile Handler
 	http.HandleFunc("/reconcile", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-
-		log.Info("[API] POST /reconcile triggered", "client", r.RemoteAddr)
 
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
@@ -276,20 +271,12 @@ func main() {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"reconciled","node":"` + nodeName + `"}`))
 		case <-ctx.Done():
-			log.Error(ctx.Err(), "[API] POST /reconcile timed out after 5s", "client", r.RemoteAddr)
 			http.Error(w, `{"error":"reconciliation timeout"}`, http.StatusGatewayTimeout)
 		}
 	})
 
-	// 6. HTTP /config Handler
+	// 4. HTTP /config Handler (Dynamic interface extraction from CRs)
 	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
-		iface := r.URL.Query().Get("interface")
-		if iface == "" {
-			iface = "enp1s0"
-		}
-
-		targetClassID := r.URL.Query().Get("classId")
-
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
@@ -301,55 +288,89 @@ func main() {
 			return
 		}
 
+		requestedIface := strings.TrimSpace(r.URL.Query().Get("interface"))
+
+		// Extract interface dynamically from active VTC CRs if not provided in URL
+		if requestedIface == "" {
+			for _, item := range list.Items {
+				if isPolicyTargetingNode(hostNode, nodeName, &item, log) && item.Spec.HtbRoot.Interface != "" {
+					requestedIface = item.Spec.HtbRoot.Interface
+					break
+				}
+			}
+		}
+
+		if requestedIface == "" {
+			discovered := discoverActiveTcInterfaces(log)
+			if len(discovered) > 0 {
+				requestedIface = discovered[0]
+			} else {
+				requestedIface = "enp1s0"
+			}
+		}
+
+		targetClassID := r.URL.Query().Get("classId")
+
 		var aggregatedSpec networkingv1alpha1.HtbRootSpec
-		aggregatedSpec.Interface = iface
+		aggregatedSpec.Interface = requestedIface
 		aggregatedSpec.Rate = "10Gbit"
+		aggregatedSpec.Classes = make([]networkingv1alpha1.ClassSpec, 0)
 
 		hasMatchingPolicy := false
 		activeStrategy := networkingv1alpha1.TcStrategyType("flower")
 		classMap := make(map[string]*networkingv1alpha1.ClassSpec)
 
 		for _, item := range list.Items {
+			crIface := item.Spec.HtbRoot.Interface
+			if crIface == "" {
+				crIface = requestedIface
+			}
+
+			if crIface != requestedIface {
+				continue
+			}
+
 			if !isPolicyTargetingNode(hostNode, nodeName, &item, log) {
 				continue
 			}
 
-			if item.Spec.HtbRoot.Interface == iface {
-				hasMatchingPolicy = true
-				if item.Spec.TcStrategy != "" {
-					activeStrategy = item.Spec.TcStrategy
-				}
-				if item.Spec.HtbRoot.HtbID > 0 {
-					aggregatedSpec.HtbID = item.Spec.HtbRoot.HtbID
-				}
-				if item.Spec.HtbRoot.DefaultClassID != "" {
-					aggregatedSpec.DefaultClassID = item.Spec.HtbRoot.DefaultClassID
-				}
-				if item.Spec.HtbRoot.Rate != "" {
-					aggregatedSpec.Rate = item.Spec.HtbRoot.Rate
-				}
+			hasMatchingPolicy = true
+			if strings.ToLower(string(item.Spec.TcStrategy)) == "ifb" {
+				activeStrategy = item.Spec.TcStrategy
+			} else if activeStrategy != "ifb" && item.Spec.TcStrategy != "" {
+				activeStrategy = item.Spec.TcStrategy
+			}
 
-				for _, cls := range item.Spec.HtbRoot.Classes {
-					cID := cls.GetClassID(aggregatedSpec.HtbID)
-					existing, found := classMap[cID]
-					if !found {
-						clsCopy := cls
-						classMap[cID] = &clsCopy
-					} else {
-						if cls.IngressRate != "" {
-							existing.IngressRate = cls.IngressRate
-							existing.IngressCeil = cls.IngressCeil
-							existing.IngressBurst = cls.IngressBurst
-							existing.IngressAction = cls.IngressAction
-						}
-						if cls.EgressRate != "" {
-							existing.EgressRate = cls.EgressRate
-							existing.EgressCeil = cls.EgressCeil
-							existing.EgressBurst = cls.EgressBurst
-						}
-						if cls.Priority > 0 {
-							existing.Priority = cls.Priority
-						}
+			if item.Spec.HtbRoot.HtbID > 0 {
+				aggregatedSpec.HtbID = item.Spec.HtbRoot.HtbID
+			}
+			if item.Spec.HtbRoot.DefaultClassID != "" {
+				aggregatedSpec.DefaultClassID = item.Spec.HtbRoot.DefaultClassID
+			}
+			if item.Spec.HtbRoot.Rate != "" {
+				aggregatedSpec.Rate = item.Spec.HtbRoot.Rate
+			}
+
+			for _, cls := range item.Spec.HtbRoot.Classes {
+				cID := cls.GetClassID(aggregatedSpec.HtbID)
+				existing, found := classMap[cID]
+				if !found {
+					clsCopy := cls
+					classMap[cID] = &clsCopy
+				} else {
+					if cls.IngressRate != "" {
+						existing.IngressRate = cls.IngressRate
+						existing.IngressCeil = cls.IngressCeil
+						existing.IngressBurst = cls.IngressBurst
+						existing.IngressAction = cls.IngressAction
+					}
+					if cls.EgressRate != "" {
+						existing.EgressRate = cls.EgressRate
+						existing.EgressCeil = cls.EgressCeil
+						existing.EgressBurst = cls.EgressBurst
+					}
+					if cls.Priority > 0 {
+						existing.Priority = cls.Priority
 					}
 				}
 			}
@@ -360,13 +381,24 @@ func main() {
 		}
 
 		if !hasMatchingPolicy {
-			log.Info("[CONFIG] No active VlanTrafficControl policy targets interface on this node", "nodeName", nodeName, "interface", iface)
+			log.Info("[CONFIG] No active VlanTrafficControl policy targets interface on this node", "nodeName", nodeName, "interface", requestedIface)
 		}
 
 		report, err := executor.InspectNodeAlignment(&aggregatedSpec, activeStrategy, targetClassID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("alignment check failed: %v", err), http.StatusInternalServerError)
 			return
+		}
+
+		report.Node = nodeName
+		report.Interface = requestedIface
+		report.Actual.Interface = requestedIface
+		if strings.ToLower(string(activeStrategy)) == "ifb" {
+			ifbDevName := fmt.Sprintf("ifb-%s", requestedIface)
+			if len(ifbDevName) > 15 {
+				ifbDevName = ifbDevName[:15]
+			}
+			report.Actual.IfbInterface = ifbDevName
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -379,7 +411,6 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	// 7. Run initial reconciliation pass asynchronously AFTER starting HTTP server
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		log.Info("[INIT] Running asynchronous startup TC reconciliation pass...")
@@ -475,16 +506,22 @@ func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger)
 	allKnownInterfaces := make(map[string]bool)
 
 	for _, item := range list.Items {
-		iface := item.Spec.HtbRoot.Interface
-		if iface == "" {
-			continue
-		}
-		allKnownInterfaces[iface] = true
-
 		if !isPolicyTargetingNode(hostNode, nodeName, &item, log) {
 			log.Info("[RECONCILE] Skipping CRD instance (does not target host node or missing toleration)", "instance", item.Name, "nodeName", nodeName)
 			continue
 		}
+
+		iface := item.Spec.HtbRoot.Interface
+		if iface == "" {
+			// Extract fallback interface dynamically from host active interfaces if unassigned
+			discovered := discoverActiveTcInterfaces(log)
+			if len(discovered) > 0 {
+				iface = discovered[0]
+			} else {
+				iface = "enp1s0"
+			}
+		}
+		allKnownInterfaces[iface] = true
 
 		aggSpec, exists := specsByInterface[iface]
 		if !exists {
@@ -560,7 +597,6 @@ func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger)
 
 		var err error
 
-		// Step 1: Egress HTB Hierarchy
 		hasEgressRules := false
 		egressSpec := *aggSpec
 		var egressClasses []networkingv1alpha1.ClassSpec
@@ -580,7 +616,6 @@ func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger)
 			}
 		}
 
-		// Step 2: Ingress Handling (IFB vs Stateless Flower Policing)
 		if strings.ToLower(string(strategy)) == "ifb" {
 			log.Info("[RECONCILE] Executing IFB Ingress Redirect and Ingress HTB Shaping", "interface", iface)
 			if errIfb := executor.ReconcileIngressHtb(aggSpec, log); errIfb != nil {

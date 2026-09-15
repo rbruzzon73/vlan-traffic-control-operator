@@ -45,14 +45,14 @@ func EnsureIfbDevice(physIface string, log logr.Logger) (string, error) {
 	cmdIngressQdisc := execHostCommand("tc", "qdisc", "add", "dev", physIface, "handle", "ffff:", "ingress")
 	_ = cmdIngressQdisc.Run()
 
-	// 2. FLUSH STALE STATELESS FILTERS
+	// 2. PURGE STALE STATELESS POLICING FILTERS
 	cmdFlushIngress := execHostCommand("tc", "filter", "del", "dev", physIface, "parent", "ffff:")
 	_ = cmdFlushIngress.Run()
 
 	cmdFlushClsact := execHostCommand("tc", "filter", "del", "dev", physIface, "ingress")
 	_ = cmdFlushClsact.Run()
 
-	// 3. ATTACH CATCH-ALL MIRRED REDIRECT FILTER TO BOTH INGRESS AND CLSACT HANDLES
+	// 3. ATTACH CLEAN CATCH-ALL MIRRED REDIRECT FILTER TO INGRESS / CLSACT HANDLES
 	cmdRedirectClsact := execHostCommand("tc", "filter", "add", "dev", physIface, "ingress",
 		"protocol", "all", "prio", "1", "handle", "1", "matchall",
 		"action", "mirred", "egress", "redirect", "dev", ifbName)

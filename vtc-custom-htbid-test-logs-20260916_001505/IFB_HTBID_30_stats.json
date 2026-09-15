@@ -1,0 +1,17 @@
+{
+  "interface": "enp1s0",
+  "node": "hub-worker01.ocp4-hub.test.com",
+  "classStats": [],
+  "ingressStats": [
+    {
+      "interface": "enp1s0",
+      "filterId": "pref-1-handle-1",
+      "direction": "ingress",
+      "classId": "1:1",
+      "name": "ifb-ingress-redirect",
+      "bytes": 3705948,
+      "packets": 2362,
+      "drops": 0
+    }
+  ]
+}

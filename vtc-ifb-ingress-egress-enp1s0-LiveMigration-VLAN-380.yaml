@@ -24,18 +24,6 @@ spec:
         ingressCeil: 10Gbit
         enableFqCodel: true
 
-      - name: vlan-100-high-priority
-        classId: "1:100"
-        vlanId: 100
-        matchType: subnet
-        subnet: 10.0.100.0/24
-        priority: 1
-        egressRate: 2Gbit
-        egressCeil: 10Gbit
-        ingressRate: 2Gbit
-        ingressCeil: 10Gbit
-        enableFqCodel: true
-
       - name: vlan-380-migration
         classId: "1:380"
         vlanId: 380

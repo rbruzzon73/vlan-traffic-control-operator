@@ -22,27 +22,35 @@ func GetInterfaceStats(iface string, desired *networkingv1alpha1.HtbRootSpec) (*
 		return stats, fmt.Errorf("failed to locate interface %s: %w", iface, err)
 	}
 
-	ifbDevName := fmt.Sprintf("ifb-%s", iface)
-	if len(ifbDevName) > 15 {
-		ifbDevName = ifbDevName[:15]
-	}
-	ifbLink, _ := netlink.LinkByName(ifbDevName)
-
+	// Dynamic Root Handle Resolution from CRD Spec
 	rootHandle := uint32(1)
 	if desired != nil && desired.HtbID > 0 {
 		rootHandle = uint32(desired.HtbID)
 	}
 	expectedRootHandle := netlink.MakeHandle(uint16(rootHandle), 0)
 
-	// Build Priority / Minor lookup map strictly scoped to the queried interface spec
+	// Build Priority / Minor / ClassID / VlanID lookup maps & detect Default Fallback Class dynamically
 	prioToSpec := make(map[uint16]networkingv1alpha1.ClassSpec)
-	if desired != nil && (desired.Interface == "" || desired.Interface == iface) {
+	classIDToSpec := make(map[string]networkingv1alpha1.ClassSpec)
+	dynamicDefaultClassID := fmt.Sprintf("%d:99", rootHandle) // Default fallback if unspecified in spec
+
+	if desired != nil {
 		for _, cls := range desired.Classes {
+			if cls.ClassID != "" {
+				classIDToSpec[cls.ClassID] = cls
+			}
+			// Detect custom default/fallback class from spec (priority 0 or named default)
+			if cls.Priority == 0 || strings.Contains(strings.ToLower(cls.Name), "default") {
+				dynamicDefaultClassID = cls.GetClassID(int(rootHandle))
+			}
 			if cls.Priority > 0 {
 				prioToSpec[uint16(cls.Priority)] = cls
 			}
 			if cls.ClassMinor > 0 {
 				prioToSpec[uint16(cls.ClassMinor)] = cls
+			}
+			if cls.VlanID > 0 {
+				prioToSpec[uint16(cls.VlanID)] = cls
 			}
 			if cls.ClassID != "" {
 				parts := strings.Split(cls.ClassID, ":")
@@ -55,27 +63,15 @@ func GetInterfaceStats(iface string, desired *networkingv1alpha1.HtbRootSpec) (*
 		}
 	}
 
-	// Check if IFB redirection is actively running on physical link
-	hasRedirectFilter := false
-	handlesToScan := []uint32{netlink.HANDLE_INGRESS, netlink.HANDLE_MIN_INGRESS, netlink.MakeHandle(0xffff, 2), netlink.HANDLE_ROOT, expectedRootHandle}
-	for _, h := range handlesToScan {
-		filters, err := netlink.FilterList(link, h)
-		if err != nil {
-			continue
-		}
-		for _, f := range filters {
-			if f.Type() == "matchall" {
-				hasRedirectFilter = true
-				break
-			}
-		}
-		if hasRedirectFilter {
-			break
-		}
+	handlesToScan := []uint32{
+		netlink.HANDLE_INGRESS,
+		netlink.HANDLE_MIN_INGRESS,
+		netlink.MakeHandle(0xffff, 2),
+		netlink.HANDLE_ROOT,
+		expectedRootHandle,
 	}
-	isIfbActive := ifbLink != nil && hasRedirectFilter
 
-	// 1. Collect HTB Egress Class Statistics on Physical Interface
+	// 1. Collect HTB Class Statistics natively for the queried interface
 	if classes, err := netlink.ClassList(link, expectedRootHandle); err == nil {
 		for _, c := range classes {
 			htb, ok := c.(*netlink.HtbClass)
@@ -88,10 +84,15 @@ func GetInterfaceStats(iface string, desired *networkingv1alpha1.HtbRootSpec) (*
 				continue
 			}
 
+			direction := "egress"
+			if strings.HasPrefix(iface, "ifb-") {
+				direction = "ingress"
+			}
+
 			cStat := networkingv1alpha1.ClassStat{
 				Interface: iface,
 				ClassID:   handleStr,
-				Direction: "egress",
+				Direction: direction,
 				Priority:  int(htb.Prio),
 			}
 
@@ -106,13 +107,13 @@ func GetInterfaceStats(iface string, desired *networkingv1alpha1.HtbRootSpec) (*
 				}
 			}
 
-			if desired != nil {
+			// Resolve human-readable name from spec
+			if spec, found := classIDToSpec[handleStr]; found {
+				cStat.ClassName = spec.Name
+			} else if desired != nil {
 				for _, cls := range desired.Classes {
 					if cls.GetClassID(int(rootHandle)) == handleStr {
 						cStat.ClassName = cls.Name
-						if cls.IngressRate != "" {
-							cStat.Direction = "ingress+egress"
-						}
 						break
 					}
 				}
@@ -122,68 +123,17 @@ func GetInterfaceStats(iface string, desired *networkingv1alpha1.HtbRootSpec) (*
 		}
 	}
 
-	// 2. Collect HTB Ingress Class Statistics on IFB Device (if active)
-	if isIfbActive {
-		if ifbClasses, err := netlink.ClassList(ifbLink, expectedRootHandle); err == nil {
-			for _, c := range ifbClasses {
-				htb, ok := c.(*netlink.HtbClass)
-				if !ok {
-					continue
-				}
-
-				handleStr := netlink.HandleStr(htb.Attrs().Handle)
-				if handleStr == fmt.Sprintf("%d:1", rootHandle) {
-					continue
-				}
-
-				cStat := networkingv1alpha1.ClassStat{
-					Interface: ifbDevName,
-					ClassID:   handleStr,
-					Direction: "ingress",
-					Priority:  int(htb.Prio),
-				}
-
-				if htb.Attrs().Statistics != nil {
-					if htb.Attrs().Statistics.Basic != nil {
-						cStat.Bytes = htb.Attrs().Statistics.Basic.Bytes
-						cStat.Packets = uint64(htb.Attrs().Statistics.Basic.Packets)
-					}
-					if htb.Attrs().Statistics.Queue != nil {
-						cStat.Drops = htb.Attrs().Statistics.Queue.Drops
-						cStat.Overlimits = htb.Attrs().Statistics.Queue.Overlimits
-					}
-				}
-
-				if desired != nil {
-					for _, cls := range desired.Classes {
-						if cls.GetClassID(int(rootHandle)) == handleStr {
-							cStat.ClassName = cls.Name
-							break
-						}
-					}
-				}
-
-				stats.ClassStats = append(stats.ClassStats, cStat)
-			}
-		}
-	}
-
-	// 3. Collect Ingress Filter Statistics
-	linksToScanStats := []netlink.Link{link}
-	if isIfbActive {
-		linksToScanStats = []netlink.Link{ifbLink}
-	}
-
-	seenStatsFilter := make(map[string]bool)
-
-	for _, scanL := range linksToScanStats {
-		scanDevName := scanL.Attrs().Name
+	// 2. Collect Ingress Filter Statistics (Only on physical interfaces, skipping IFB devices)
+	if !strings.HasPrefix(iface, "ifb-") {
+		seenStatsFilter := make(map[string]bool)
 
 		for _, h := range handlesToScan {
-			filters, err := netlink.FilterList(scanL, h)
+			filters, err := netlink.FilterList(link, h)
 			if err != nil {
 				continue
 			}
+
+			hasMatchAll := false
 
 			for _, f := range filters {
 				attrs := f.Attrs()
@@ -192,15 +142,50 @@ func GetInterfaceStats(iface string, desired *networkingv1alpha1.HtbRootSpec) (*
 				}
 
 				prio := attrs.Priority
-				dedupKey := fmt.Sprintf("%s-%d-%d-%d", scanDevName, prio, attrs.Handle, attrs.Protocol)
+				dedupKey := fmt.Sprintf("%s-%d-%d-%d", iface, prio, attrs.Handle, attrs.Protocol)
 				if seenStatsFilter[dedupKey] {
 					continue
 				}
 				seenStatsFilter[dedupKey] = true
 
 				var bytesVal, pktsVal, dropsVal uint64
+				var flowerVlanID int
+				filterType := f.Type()
+
+				// Rule: If matchall redirect is active, collect its stats and skip unreachable rules
+				if matchall, ok := f.(*netlink.MatchAll); ok || filterType == "matchall" {
+					if matchall != nil {
+						for _, act := range matchall.Actions {
+							if actInfo := act.Attrs(); actInfo != nil && actInfo.Statistics != nil {
+								if actInfo.Statistics.Basic != nil {
+									bytesVal += actInfo.Statistics.Basic.Bytes
+									pktsVal += uint64(actInfo.Statistics.Basic.Packets)
+								}
+								if actInfo.Statistics.Queue != nil {
+									dropsVal += uint64(actInfo.Statistics.Queue.Drops)
+								}
+							}
+						}
+					}
+
+					filterIDStr := fmt.Sprintf("pref-%d-handle-%d", prio, attrs.Handle)
+					stats.IngressStats = append(stats.IngressStats, networkingv1alpha1.IngressStat{
+						Interface: iface,
+						FilterID:  filterIDStr,
+						Direction: "ingress",
+						ClassID:   fmt.Sprintf("%d:1", rootHandle),
+						ClassName: "ifb-ingress-redirect",
+						Bytes:     bytesVal,
+						Packets:   pktsVal,
+						Drops:     dropsVal,
+					})
+
+					hasMatchAll = true
+					break // Short-circuit ghost rules behind matchall on this scan
+				}
 
 				if flower, ok := f.(*netlink.Flower); ok {
+					flowerVlanID = int(flower.VlanId)
 					for _, act := range flower.Actions {
 						if actInfo := act.Attrs(); actInfo != nil && actInfo.Statistics != nil {
 							if actInfo.Statistics.Basic != nil {
@@ -216,7 +201,7 @@ func GetInterfaceStats(iface string, desired *networkingv1alpha1.HtbRootSpec) (*
 
 				filterIDStr := fmt.Sprintf("pref-%d-handle-%d", prio, attrs.Handle)
 				iStat := networkingv1alpha1.IngressStat{
-					Interface: scanDevName,
+					Interface: iface,
 					FilterID:  filterIDStr,
 					Direction: "ingress",
 					Bytes:     bytesVal,
@@ -224,20 +209,43 @@ func GetInterfaceStats(iface string, desired *networkingv1alpha1.HtbRootSpec) (*
 					Drops:     dropsVal,
 				}
 
+				// Enrich IngressStat metadata using lookup map or direct class matching
 				if spec, found := prioToSpec[prio]; found {
 					iStat.ClassID = spec.GetClassID(int(rootHandle))
+					iStat.ClassName = spec.Name
 					iStat.Subnet = spec.Subnet
+					iStat.VlanID = spec.VlanID
 				} else if desired != nil {
 					for _, cls := range desired.Classes {
-						if cls.Priority == int(prio) || cls.ClassMinor == int(prio) {
+						if cls.Priority == int(prio) || cls.ClassMinor == int(prio) || (flowerVlanID > 0 && cls.VlanID == flowerVlanID) {
 							iStat.ClassID = cls.GetClassID(int(rootHandle))
+							iStat.ClassName = cls.Name
 							iStat.Subnet = cls.Subnet
+							iStat.VlanID = cls.VlanID
 							break
 						}
 					}
 				}
 
+				// Dynamic fallback naming: use dynamic default class ID and root handle
+				if iStat.ClassName == "" {
+					if prio == 49152 || prio == 0 {
+						iStat.ClassName = "default-fallback"
+						iStat.ClassID = dynamicDefaultClassID
+					} else if flowerVlanID > 0 {
+						iStat.ClassName = fmt.Sprintf("vlan-%d-migration", flowerVlanID)
+						iStat.ClassID = fmt.Sprintf("%d:%d", rootHandle, flowerVlanID)
+						iStat.VlanID = flowerVlanID
+					} else {
+						iStat.ClassName = fmt.Sprintf("prio-%d-filter", prio)
+					}
+				}
+
 				stats.IngressStats = append(stats.IngressStats, iStat)
+			}
+
+			if hasMatchAll {
+				break // Short-circuit further handle scans for physical interface ingress
 			}
 		}
 	}

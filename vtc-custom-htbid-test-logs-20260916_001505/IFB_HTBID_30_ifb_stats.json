@@ -1,0 +1,6 @@
+{
+  "interface": "ifb-enp1s0",
+  "node": "hub-worker01.ocp4-hub.test.com",
+  "classStats": [],
+  "ingressStats": []
+}

@@ -12,7 +12,7 @@ VM_NAME="vm-vlan100"
 PHYS_IFACE="enp1s0"
 BR_IFACE="br-vlan380"
 
-IFB_MANIFEST="vtc-ifb-ingress-egress-enp1s0-LiveMigration-VLAN-380.yaml"
+IFB_MANIFEST="vtc-ifb-ingress-egress-enp1s0-LiveMigration-2VLANs.yaml"
 FLOWER_MANIFEST="vtc-flower-ingress-egress-enp1s0-liveMigration-VLAN-380.yaml"
 
 WORKER_NODES=(
@@ -177,19 +177,37 @@ get_node_bytes() {
   local direction="$2" # egress or ingress
   local strategy="$3"  # IFB or Flower
 
+  local res_phys res_br
+  res_phys=$(curl -s --connect-timeout 2 "http://${ip}:8080/stats?interface=${PHYS_IFACE}" || echo "{}")
+
   if [ "${strategy}" == "Flower" ] && [ "${direction}" == "ingress" ]; then
-    # Direct query against bridge interface (br-vlan380) for VLAN 380 ingress filter (pref-3 / pref-1)
-    local res
-    res=$(curl -s --connect-timeout 2 "http://${ip}:8080/stats?interface=${BR_IFACE}" || echo "{}")
-    echo "${res}" | jq -r '[.ingressStats[]? | select(.filterId | contains("pref-3") or contains("pref-1")) | .bytes] | add // 0' 2>/dev/null || echo "0"
+    # 1. Try Bridge Ingress Filter Stats (br-vlan380)
+    res_br=$(curl -s --connect-timeout 2 "http://${ip}:8080/stats?interface=${BR_IFACE}" || echo "{}")
+    local bytes_br
+    bytes_br=$(echo "${res_br}" | jq -r '[.ingressStats[]? | select(.classId=="1:380" or .classId=="2:380" or .vlanId==380 or (.filterId | contains("pref-3"))) | .bytes] | add // 0' 2>/dev/null || echo "0")
+
+    if [ "${bytes_br}" -gt 1000000 ]; then
+      echo "${bytes_br}"
+      return
+    fi
+
+    # 2. Try Physical Ingress Filter Stats (enp1s0)
+    local bytes_phys_filter
+    bytes_phys_filter=$(echo "${res_phys}" | jq -r '[.ingressStats[]? | select(.classId=="1:380" or .classId=="2:380" or .vlanId==380) | .bytes] | add // 0' 2>/dev/null || echo "0")
+
+    if [ "${bytes_phys_filter}" -gt 1000000 ]; then
+      echo "${bytes_phys_filter}"
+      return
+    fi
+
+    # 3. Fallback: Query Class Stats on Physical Interface (enp1s0)
+    echo "${res_phys}" | jq -r '[.classStats[]? | select(.classId=="1:380" or .classId=="2:380") | .bytes] | add // 0' 2>/dev/null || echo "0"
   else
-    # Egress or IFB Ingress: Query class 1:380 on physical or IFB interface
-    local res
-    res=$(curl -s --connect-timeout 2 "http://${ip}:8080/stats?interface=${PHYS_IFACE}" || echo "{}")
+    # Egress or IFB Ingress: Query class 1:380 / 2:380 on physical or IFB interface
     if [ "${direction}" == "egress" ]; then
-      echo "${res}" | jq -r '[.classStats[]? | select(.interface=="'"${PHYS_IFACE}"'" and .classId=="1:380") | .bytes] | add // 0' 2>/dev/null || echo "0"
+      echo "${res_phys}" | jq -r '[.classStats[]? | select((.interface=="'"${PHYS_IFACE}"'" or .interface=="ifb-enp1s0") and (.classId=="1:380" or .classId=="2:380")) | .bytes] | add // 0' 2>/dev/null || echo "0"
     else
-      echo "${res}" | jq -r '[.classStats[]? | select((.interface=="ifb-enp1s0" or .interface=="'"${PHYS_IFACE}"'") and .classId=="1:380") | .bytes] | add // 0' 2>/dev/null || echo "0"
+      echo "${res_phys}" | jq -r '[.classStats[]? | select((.interface=="ifb-enp1s0" or .interface=="'"${PHYS_IFACE}"'") and (.classId=="1:380" or .classId=="2:380")) | .bytes] | add // 0' 2>/dev/null || echo "0"
     fi
   fi
 }
@@ -242,22 +260,21 @@ run_strategy_test() {
   local source_ip
   source_ip=$(get_node_ip "${initial_node}")
 
-  # Identify candidate target node (worker node NOT hosting the source VMI)
-  local target_candidate_node
-  target_candidate_node=$(oc get nodes -l node-role.kubernetes.io/worker -o jsonpath="{.items[?(@.metadata.name!='${initial_node}')].metadata.name}" | awk '{print $1}')
-  
-  local target_candidate_ip
-  target_candidate_ip=$(get_node_ip "${target_candidate_node}")
-
-  log_info "Capturing Pre-Migration Baseline Stats..."
+  log_info "Capturing Pre-Migration Baseline Stats across all candidate worker nodes..."
+  declare -A baseline_ingress_map
   local base_bytes_src
   base_bytes_src=$(get_node_bytes "${source_ip}" "egress" "${strategy}")
-  
-  local base_bytes_dst
-  base_bytes_dst=$(get_node_bytes "${target_candidate_ip}" "ingress" "${strategy}")
 
-  log_info "  └─ Source Node (${initial_node} / ${source_ip}) Pre-Migration Egress Baseline:  ${base_bytes_src} bytes"
-  log_info "  └─ Target Node (${target_candidate_node} / ${target_candidate_ip}) Pre-Migration Ingress Baseline: ${base_bytes_dst} bytes"
+  for node in "${WORKER_NODES[@]}"; do
+    local node_ip
+    node_ip=$(get_node_ip "${node}")
+    if [ "${node}" != "${initial_node}" ] && [ -n "${node_ip}" ]; then
+      baseline_ingress_map["${node}"]=$(get_node_bytes "${node_ip}" "ingress" "${strategy}")
+      log_info "  └─ Candidate Target (${node} / ${node_ip}) Ingress Baseline: ${baseline_ingress_map["${node}"]} bytes"
+    fi
+  done
+
+  log_info "  └─ Source Node (${initial_node} / ${source_ip}) Pre-Migration Egress Baseline: ${base_bytes_src} bytes"
 
   log_info "Triggering Live Migration..."
   virtctl migrate "${VM_NAME}" -n "${NAMESPACE}"
@@ -311,6 +328,7 @@ run_strategy_test() {
 
   sleep 2
 
+  local base_bytes_dst=${baseline_ingress_map["${target_node}"]:-0}
   local post_bytes_src
   post_bytes_src=$(get_node_bytes "${source_ip}" "egress" "${strategy}")
   local post_bytes_dst

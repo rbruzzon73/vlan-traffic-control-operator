@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 
 	"github.com/vishvananda/netlink"
 	networkingv1alpha1 "networking.med.io/vlan-traffic-control/api/v1alpha1"
@@ -75,7 +76,7 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrateg
 	}
 
 	ifbLink, errIfb := netlink.LinkByName(ifbDevName)
-	isIfbActive := errIfb == nil && ifbLink != nil
+	isIfbActive := strings.ToLower(string(activeStrategy)) == "ifb" && errIfb == nil && ifbLink != nil
 
 	if isIfbActive {
 		report.Actual.IfbInterface = ifbDevName
@@ -194,22 +195,41 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrateg
 		report.Actual.Classes = append(report.Actual.Classes, *spec)
 	}
 
-	// 3. Inspect Filters
-	linksToScan := []netlink.Link{physLink}
-	if isIfbActive {
-		linksToScan = append(linksToScan, ifbLink)
+	// 3. Inspect Filters (Purge stale physical parent ffff: filters if IFB strategy active)
+	type scanTarget struct {
+		link    netlink.Link
+		handles []uint32
 	}
 
-	clsactIngressHandle := netlink.MakeHandle(0xffff, 2)
-	handlesToScan := []uint32{netlink.HANDLE_INGRESS, netlink.HANDLE_MIN_INGRESS, clsactIngressHandle, netlink.HANDLE_ROOT, expectedRootHandle}
+	var scanTargets []scanTarget
+
+	if isIfbActive {
+		// IFB Active: Scan ONLY ingress handle on Physical (mirred redirect), and ingress handle on IFB
+		scanTargets = append(scanTargets, scanTarget{
+			link:    physLink,
+			handles: []uint32{netlink.HANDLE_INGRESS},
+		})
+		scanTargets = append(scanTargets, scanTarget{
+			link:    ifbLink,
+			handles: []uint32{netlink.HANDLE_INGRESS},
+		})
+	} else {
+		// Flower Active: Scan ingress & legacy parent ffff: on physical interface
+		clsactIngressHandle := netlink.MakeHandle(0xffff, 2)
+		scanTargets = append(scanTargets, scanTarget{
+			link:    physLink,
+			handles: []uint32{netlink.HANDLE_INGRESS, netlink.HANDLE_MIN_INGRESS, clsactIngressHandle},
+		})
+	}
+
 	seenFilters := make(map[string]bool)
 
-	for _, scanLink := range linksToScan {
-		isVirtual := scanLink.Attrs().Name == ifbDevName
-		scanIfaceName := scanLink.Attrs().Name
+	for _, target := range scanTargets {
+		isVirtual := target.link.Attrs().Name == ifbDevName
+		scanIfaceName := target.link.Attrs().Name
 
-		for _, h := range handlesToScan {
-			filters, err := netlink.FilterList(scanLink, h)
+		for _, h := range target.handles {
+			filters, err := netlink.FilterList(target.link, h)
 			if err != nil {
 				continue
 			}

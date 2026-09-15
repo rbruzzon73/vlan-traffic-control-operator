@@ -233,11 +233,13 @@ type ClassStat struct {
 }
 
 type IngressStat struct {
-	Interface string `json:"interface,omitempty"`
-	ClassID   string `json:"classId,omitempty"`
+	Interface string `json:"interface"`
 	FilterID  string `json:"filterId"`
-	Direction string `json:"direction,omitempty"` // "ingress", "egress"
+	Direction string `json:"direction"`
+	ClassID   string `json:"classId,omitempty"`
+	ClassName string `json:"name,omitempty"`
 	Subnet    string `json:"subnet,omitempty"`
+	VlanID    int    `json:"vlanId,omitempty"`
 	Bytes     uint64 `json:"bytes"`
 	Packets   uint64 `json:"packets"`
 	Drops     uint64 `json:"drops"`
@@ -338,80 +340,100 @@ type VlanTrafficControlList struct {
 }
 
 type VlanTrafficControlClassSpec struct {
+	// ClassName is the human-readable class name referenced from parent VlanTrafficControl CR.
 	// +kubebuilder:validation:Description="Human-readable class name referenced from parent VlanTrafficControl CR."
 	ClassName string `json:"className"`
 
+	// Direction is the traffic flow direction for this class ('ingress', 'egress', or 'ingress+egress').
 	// +optional
 	// +kubebuilder:validation:Description="Traffic flow direction for this class ('ingress', 'egress', or 'ingress+egress')."
 	Direction string `json:"direction,omitempty"`
 
+	// ClassID is the resolved HTB class ID handle (e.g., '1:100', '1:380').
 	// +kubebuilder:validation:Description="Resolved HTB class ID handle (e.g., '1:100', '1:380')."
 	ClassID string `json:"classId"`
 
+	// MatchType is the traffic classification rule type used for matching.
 	// +optional
 	// +kubebuilder:validation:Description="Traffic classification rule type used for matching."
 	MatchType string `json:"matchType,omitempty"`
 
+	// VlanID is the VLAN ID associated with this class projection.
 	// +optional
 	// +kubebuilder:validation:Description="VLAN ID associated with this class projection."
 	VlanID int `json:"vlanId,omitempty"`
 
+	// Subnet is the IP Subnet CIDR associated with this class projection.
 	// +optional
 	// +kubebuilder:validation:Description="IP Subnet CIDR associated with this class projection."
 	Subnet string `json:"subnet,omitempty"`
 
+	// Mark is the FWMark value associated with this class projection.
 	// +optional
 	// +kubebuilder:validation:Description="FWMark value associated with this class projection."
 	Mark uint32 `json:"mark,omitempty"`
 
+	// IP is the target IP address associated with this class projection.
 	// +optional
 	// +kubebuilder:validation:Description="Target IP address associated with this class projection."
 	IP string `json:"ip,omitempty"`
 
+	// Port is the target TCP/UDP port associated with this class projection.
 	// +optional
 	// +kubebuilder:validation:Description="Target TCP/UDP port associated with this class projection."
 	Port int `json:"port,omitempty"`
 
+	// Dscp is the target DSCP code point associated with this class projection.
 	// +optional
 	// +kubebuilder:validation:Description="Target DSCP code point associated with this class projection."
 	Dscp int `json:"dscp,omitempty"`
 
+	// Guaranteed is the guaranteed bandwidth rate allocated for egress traffic.
 	// +optional
 	// +kubebuilder:validation:Description="Guaranteed bandwidth rate allocated for egress traffic."
 	Guaranteed string `json:"guaranteed,omitempty"`
 
+	// CeilBorrow is the maximum ceiling rate allowed for dynamic egress bandwidth borrowing.
 	// +optional
 	// +kubebuilder:validation:Description="Maximum ceiling rate allowed for dynamic egress bandwidth borrowing."
 	CeilBorrow string `json:"ceilBorrow,omitempty"`
 
+	// EgressBurst is the configured egress burst size buffer.
 	// +optional
 	// +kubebuilder:validation:Description="Configured egress burst size buffer."
 	EgressBurst string `json:"egressBurst,omitempty"`
 
+	// EnableFqCodel indicates if FQ_CoDel Active Queue Management is enabled on this class.
 	// +optional
 	// +kubebuilder:validation:Description="Indicates if FQ_CoDel Active Queue Management is enabled on this class."
 	EnableFqCodel bool `json:"enableFqCodel,omitempty"`
 
+	// IngressRate is the guaranteed bandwidth rate allocated for ingress traffic.
 	// +optional
 	// +kubebuilder:validation:Description="Guaranteed bandwidth rate allocated for ingress traffic."
 	IngressRate string `json:"ingressRate,omitempty"`
 
+	// IngressCeil is the maximum ceiling rate allowed for ingress IFB traffic.
 	// +optional
 	// +kubebuilder:validation:Description="Maximum ceiling rate allowed for ingress IFB traffic."
 	IngressCeil string `json:"ingressCeil,omitempty"`
 
+	// IngressBurst is the configured ingress burst size buffer.
 	// +optional
 	// +kubebuilder:validation:Description="Configured ingress burst size buffer."
 	IngressBurst string `json:"ingressBurst,omitempty"`
 
+	// IngressAction is the action taken when ingress rate is exceeded.
 	// +optional
 	// +kubebuilder:validation:Description="Action taken when ingress rate is exceeded."
 	IngressAction IngressAction `json:"ingressAction,omitempty"`
 
+	// Priority is the filter evaluation priority assigned to this class rule.
 	// +optional
 	// +kubebuilder:validation:Description="Filter evaluation priority assigned to this class rule."
 	Priority int `json:"priority,omitempty"`
 
+	// Aligned is the alignment status confirming runtime kernel state matches this spec ('True' or 'False').
 	// +optional
 	// +kubebuilder:validation:Description="Alignment status confirming runtime kernel state matches this spec ('True' or 'False')."
 	Aligned string `json:"aligned,omitempty"`

@@ -202,7 +202,6 @@ func main() {
 
 		iface := strings.TrimSpace(r.URL.Query().Get("interface"))
 
-		// If interface parameter is missing, dynamically resolve from active CRs targeting this node
 		if iface == "" {
 			hostNode := getHostNode(ctx, k8sClient, nodeName, log)
 			var list networkingv1alpha1.VlanTrafficControlList
@@ -221,7 +220,7 @@ func main() {
 			if len(discovered) > 0 {
 				iface = discovered[0]
 			} else {
-				iface = "enp1s0" // Emergency fallback if host discovery fails
+				iface = "enp1s0"
 			}
 		}
 
@@ -275,7 +274,7 @@ func main() {
 		}
 	})
 
-	// 4. HTTP /config Handler (Dynamic interface extraction from CRs)
+	// 4. HTTP /config Handler
 	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
@@ -290,7 +289,6 @@ func main() {
 
 		requestedIface := strings.TrimSpace(r.URL.Query().Get("interface"))
 
-		// Extract interface dynamically from active VTC CRs if not provided in URL
 		if requestedIface == "" {
 			for _, item := range list.Items {
 				if isPolicyTargetingNode(hostNode, nodeName, &item, log) && item.Spec.HtbRoot.Interface != "" {
@@ -513,7 +511,6 @@ func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger)
 
 		iface := item.Spec.HtbRoot.Interface
 		if iface == "" {
-			// Extract fallback interface dynamically from host active interfaces if unassigned
 			discovered := discoverActiveTcInterfaces(log)
 			if len(discovered) > 0 {
 				iface = discovered[0]
@@ -623,6 +620,9 @@ func reconcileLocalTc(k8sClient client.Client, nodeName string, log logr.Logger)
 				err = errIfb
 			}
 		} else {
+			// Clear IFB device if switching away from IFB strategy
+			_ = executor.FlushIfbDevice(iface)
+
 			hasIngressRules := false
 			for _, cls := range aggSpec.Classes {
 				if cls.IngressRate != "" {

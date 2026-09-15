@@ -72,50 +72,84 @@ spec:
           spec:
             properties:
               aligned:
+                description: Aligned is the alignment status confirming runtime kernel
+                  state matches this spec ('True' or 'False').
                 type: string
               ceilBorrow:
+                description: CeilBorrow is the maximum ceiling rate allowed for dynamic
+                  egress bandwidth borrowing.
                 type: string
               classId:
+                description: ClassID is the resolved HTB class ID handle (e.g., '1:100',
+                  '1:380').
                 type: string
               className:
+                description: ClassName is the human-readable class name referenced
+                  from parent VlanTrafficControl CR.
                 type: string
               direction:
+                description: Direction is the traffic flow direction for this class
+                  ('ingress', 'egress', or 'ingress+egress').
                 type: string
               dscp:
+                description: Dscp is the target DSCP code point associated with this
+                  class projection.
                 type: integer
               egressBurst:
+                description: EgressBurst is the configured egress burst size buffer.
                 type: string
               enableFqCodel:
+                description: EnableFqCodel indicates if FQ_CoDel Active Queue Management
+                  is enabled on this class.
                 type: boolean
               guaranteed:
+                description: Guaranteed is the guaranteed bandwidth rate allocated
+                  for egress traffic.
                 type: string
               ingressAction:
-                description: IngressAction defines the action taken on packets exceeding
-                  the policed rate limit.
+                description: IngressAction is the action taken when ingress rate is
+                  exceeded.
                 enum:
                 - drop
                 - pass
                 type: string
               ingressBurst:
+                description: IngressBurst is the configured ingress burst size buffer.
                 type: string
               ingressCeil:
+                description: IngressCeil is the maximum ceiling rate allowed for ingress
+                  IFB traffic.
                 type: string
               ingressRate:
+                description: IngressRate is the guaranteed bandwidth rate allocated
+                  for ingress traffic.
                 type: string
               ip:
+                description: IP is the target IP address associated with this class
+                  projection.
                 type: string
               mark:
+                description: Mark is the FWMark value associated with this class projection.
                 format: int32
                 type: integer
               matchType:
+                description: MatchType is the traffic classification rule type used
+                  for matching.
                 type: string
               port:
+                description: Port is the target TCP/UDP port associated with this
+                  class projection.
                 type: integer
               priority:
+                description: Priority is the filter evaluation priority assigned to
+                  this class rule.
                 type: integer
               subnet:
+                description: Subnet is the IP Subnet CIDR associated with this class
+                  projection.
                 type: string
               vlanId:
+                description: VlanID is the VLAN ID associated with this class projection.
                 type: integer
             required:
             - classId

@@ -1,0 +1,169 @@
+#-------------- OPEN POINTS --------------#
+
+1) test-custom-htbid-suite.sh failed
+   Logs in ./vtc-custom-htbid-test-logs-20260916_001505
+   Direct references to "1:99" in cmd/agent/main.go and pkg/executor/alignment.go to be removed [1]
+
+2) Additional configuration improvements [2]:
+      - Burst defined in the ClassSpec but Cburst missing
+      - Ingress and Egress default Burst to be aligned
+
+
+#---------------- Details ----------------#
+
+[1] Fix to be implemented 
+
+$ grep -rnE '"[0-9]+:[0-9]+"' --include="*.go" .
+./cmd/agent/main.go:125: defaultClassHandles["1:99"] = true
+./cmd/agent/main.go:126: classMap["1:99"] = "default-fallback"
+./pkg/executor/alignment.go:192: if spec.Name == "" && (classID == "1:99" || classID == fmt.Sprintf("%d:99", rootHandle)) {
+
+- cmd/agent/main.go (Lines 125 & 126):
+
+defaultClassHandles["1:99"] = true
+classMap["1:99"] = "default-fallback"
+
+Impact: If a user configures a custom default fallback class (e.g., 1:999 or 10:99) in their CRD, the agent's stats endpoint pre-populates the default mapping to "1:99" rather than using the CRD's configured default minor ID or HTB Root ID.
+
+- pkg/executor/alignment.go (Line 192):
+
+if spec.Name == "" && (classID == "1:99" || classID == fmt.Sprintf("%d:99", rootHandle)) {
+Impact: Checks whether a class ID is specifically 1:99 or <rootHandle>:99 to label it as unassigned fallback traffic.
+
+Change to be applied:
+
+1. Refactoring cmd/agent/main.go
+Instead of statically inserting "1:99", derive the default fallback class ID dynamically from the desired CRD spec (or fall back to <rootHandle>:99 if not defined):
+
+// Determine Root Handle and Fallback Class ID dynamically from desired spec
+rootHandle := 1
+if desiredSpec != nil && desiredSpec.HtbID > 0 {
+    rootHandle = desiredSpec.HtbID
+}
+
+fallbackMinor := 99
+fallbackName := "default-fallback"
+
+if desiredSpec != nil {
+    for _, cls := range desiredSpec.Classes {
+        if cls.Priority == 0 || strings.Contains(strings.ToLower(cls.Name), "default") {
+            if parts := strings.Split(cls.ClassID, ":"); len(parts) == 2 {
+                if minor, err := strconv.Atoi(parts[1]); err == nil {
+                    fallbackMinor = minor
+                }
+            }
+            if cls.Name != "" {
+                fallbackName = cls.Name
+            }
+            break
+        }
+    }
+}
+
+dynamicFallbackHandle := fmt.Sprintf("%d:%d", rootHandle, fallbackMinor)
+defaultClassHandles[dynamicFallbackHandle] = true
+classMap[dynamicFallbackHandle] = fallbackName
+
+2. Refactoring pkg/executor/alignment.go
+Update line 192 in alignment.go to evaluate against the dynamic fallback minor ID (or check if spec.Priority == 0):
+
+Go
+// Replace static "1:99" check with dynamic spec inspection
+isDefaultFallback := spec.Priority == 0 || 
+    strings.HasSuffix(classID, ":99") || 
+    strings.Contains(strings.ToLower(spec.Name), "default")
+
+if spec.Name == "" && isDefaultFallback {
+    spec.Name = "default-fallback"
+}
+
+
+
+[2] Improvements to be implemented
+- Burst defined in the ClassSpec but Cburst missing
+- Ingress and Egress default Burst to be aligned
+
+
+// ClassSpec defines individual HTB class configuration parameters.
+type ClassSpec struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Description="Unique human-readable name for this traffic class rule (e.g., vlan-100-high-priority)."
+	Name string `json:"name"`
+
+	// +optional
+	// +kubebuilder:validation:Description="HTB class handle identifier (e.g., 1:100). If omitted, classMinor is used to construct handle '1:<minor>'."
+	ClassID string `json:"classId,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="HTB class minor number (1-65535) used to derive the class handle if classId is omitted."
+	ClassMinor int `json:"classMinor,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Enum=vlan;subnet;mark;ip;port;dscp
+	// +kubebuilder:validation:Description="Packet classification match type. Supported options: 'vlan', 'subnet', 'mark', 'ip', 'port', 'dscp'."
+	MatchType string `json:"matchType,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="VLAN Tag ID (1-4094) to match for traffic classification."
+	VlanID int `json:"vlanId,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="CIDR subnet block (e.g., 10.0.100.0/24) to match target packet destination/source IP addresses."
+	Subnet string `json:"subnet,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="FWMark 32-bit integer value to match packets pre-classified by iptables/nftables."
+	Mark uint32 `json:"mark,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Specific IPv4 or IPv6 address to match for traffic classification."
+	IP string `json:"ip,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="TCP/UDP port number to match for traffic classification."
+	Port int `json:"port,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="DSCP Quality of Service code point value to match."
+	Dscp int `json:"dscp,omitempty"`
+
+	// Egress parameters
+	// +optional
+	// +kubebuilder:validation:Description="Guaranteed minimum egress bandwidth rate (e.g., 2Gbit, 500Mbit)."
+	EgressRate string `json:"egressRate,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Maximum ceiling egress bandwidth rate for dynamic HTB borrowing (e.g., 10Gbit)."
+	EgressCeil string `json:"egressCeil,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Egress token bucket burst buffer size (e.g., 16Mb, 64Mb) to absorb high-throughput TCP spikes."
+	EgressBurst string `json:"egressBurst,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Enable FQ_CoDel Active Queue Management to prevent bufferbloat and optimize latency for small control-plane packets."
+	EnableFqCodel bool `json:"enableFqCodel,omitempty"`
+
+	// Ingress parameters
+	// +optional
+	// +kubebuilder:validation:Description="Guaranteed minimum ingress bandwidth rate (e.g., 2Gbit, 500Mbit)."
+	IngressRate string `json:"ingressRate,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Maximum ceiling ingress bandwidth rate on IFB virtual devices (e.g., 10Gbit)."
+	IngressCeil string `json:"ingressCeil,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Ingress token bucket burst buffer size (e.g., 16Mb, 64Mb) for TC policing/shaping."
+	IngressBurst string `json:"ingressBurst,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Action taken on packets exceeding policed rate: 'drop' (hard cap) or 'pass' (allow overlimit)."
+	IngressAction IngressAction `json:"ingressAction,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Description="Strict evaluation priority (0-49152). Lower priority numbers are evaluated first in TC flower pipelines."
+	Priority int `json:"priority,omitempty"`
+}
+
+

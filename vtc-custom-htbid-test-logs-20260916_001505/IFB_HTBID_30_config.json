@@ -1,0 +1,73 @@
+{
+  "node": "hub-worker01.ocp4-hub.test.com",
+  "interface": "enp1s0",
+  "isAligned": true,
+  "desired": {
+    "interface": "enp1s0",
+    "htbId": 30,
+    "defaultClassId": "30:88",
+    "rate": "10Gbit",
+    "classes": [
+      {
+        "name": "fwmark-500-custom",
+        "classId": "30:500",
+        "matchType": "mark",
+        "mark": 30500,
+        "egressRate": "1.5Gbit",
+        "egressCeil": "4Gbit",
+        "enableFqCodel": true,
+        "ingressRate": "2Gbit",
+        "ingressCeil": "6Gbit",
+        "priority": 4
+      },
+      {
+        "name": "custom-default-88",
+        "classId": "30:88",
+        "egressRate": "200Mbit",
+        "egressCeil": "10Gbit",
+        "enableFqCodel": true,
+        "ingressRate": "300Mbit",
+        "ingressCeil": "10Gbit"
+      },
+      {
+        "name": "vlan-150-custom",
+        "classId": "30:150",
+        "matchType": "vlan",
+        "vlanId": 150,
+        "egressRate": "3Gbit",
+        "egressCeil": "8Gbit",
+        "enableFqCodel": true,
+        "ingressRate": "4Gbit",
+        "ingressCeil": "10Gbit",
+        "priority": 2
+      }
+    ]
+  },
+  "actual": {
+    "interface": "enp1s0",
+    "ifbInterface": "ifb-enp1s0",
+    "htbQdiscPresent": true,
+    "ingressPresent": true,
+    "clsactPresent": true,
+    "classes": [],
+    "ingressFilters": [
+      {
+        "priority": 2,
+        "handle": 1,
+        "interface": "ifb-enp1s0",
+        "type": "flower",
+        "protocol": 33024,
+        "name": "vlan-150-custom",
+        "matchType": "vlan",
+        "vlanId": 150,
+        "ingressRate": "4Gbit",
+        "action": "htb classify",
+        "matches": {
+          "eth_type": "0x8100",
+          "vlan_id": "150"
+        }
+      }
+    ]
+  },
+  "driftDeltas": []
+}

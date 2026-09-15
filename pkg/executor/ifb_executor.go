@@ -38,19 +38,16 @@ func EnsureIfbDevice(physIface string, log logr.Logger) (string, error) {
 		return "", fmt.Errorf("failed bringing UP IFB device %s: %s (%v)", ifbName, string(out), errUp)
 	}
 
-	// 1. ENSURE CLSACT / INGRESS QDISC ON PHYSICAL INTERFACE
+	// 1. PURGE INGRESS / CLSACT QDISCS ENTIRELY ON PHYSICAL INTERFACE TO CLEAR STALE FLOWER FILTERS
+	_ = execHostCommand("tc", "qdisc", "del", "dev", physIface, "clsact").Run()
+	_ = execHostCommand("tc", "qdisc", "del", "dev", physIface, "ingress").Run()
+
+	// 2. RE-ADD CLSACT AND INGRESS QDISCS FRESH
 	cmdClsactQdisc := execHostCommand("tc", "qdisc", "add", "dev", physIface, "clsact")
 	_ = cmdClsactQdisc.Run()
 
 	cmdIngressQdisc := execHostCommand("tc", "qdisc", "add", "dev", physIface, "handle", "ffff:", "ingress")
 	_ = cmdIngressQdisc.Run()
-
-	// 2. PURGE STALE STATELESS POLICING FILTERS
-	cmdFlushIngress := execHostCommand("tc", "filter", "del", "dev", physIface, "parent", "ffff:")
-	_ = cmdFlushIngress.Run()
-
-	cmdFlushClsact := execHostCommand("tc", "filter", "del", "dev", physIface, "ingress")
-	_ = cmdFlushClsact.Run()
 
 	// 3. ATTACH CLEAN CATCH-ALL MIRRED REDIRECT FILTER TO INGRESS / CLSACT HANDLES
 	cmdRedirectClsact := execHostCommand("tc", "filter", "add", "dev", physIface, "ingress",

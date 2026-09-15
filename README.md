@@ -1324,12 +1324,12 @@ Run this command from inside the cluster manager pod to check alignment across a
 ```bash
 for pod_ip in $(oc get pods -n openshift-vlan-tc-operator -l app=vlan-traffic-control-agent -o jsonpath='{.items[*].status.podIP}'); do
   oc exec -n openshift-vlan-tc-operator deploy/vlan-traffic-control-manager -- \
-    curl -s "http://${pod_ip}:8080/config?interface=enp1s0" | jq .
+    curl -s "http://${pod_ip}:8080/config" | jq .
 done
 ```
 
 #### 2. Audit Single VLAN or TC Rule Alignment
-Isolate alignment status for a specific class ID handle (e.g., `1:380` / VLAN 380):
+Isolate alignment status for a specific class ID handle (e.g., `1:380` / VLAN 380 of enp1s0):
 
 ```bash
 VLAN_ID=380

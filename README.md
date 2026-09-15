@@ -1332,19 +1332,19 @@ done
 Isolate alignment status for a specific class ID handle (e.g., `1:380` / VLAN 380):
 
 ```bash
-CLASS_ID="1:380"
-curl -s "http://${agent_pod_ip}:8080/config?interface=enp1s0" | jq --arg cid "$CLASS_ID" '
-  (.desired.classes[] | select(.classId == $cid).name) as $targetName |
-  {
+VLAN_ID=380
+
+curl -s "http://192.168.100.21:8080/config?interface=enp1s0" | jq \
+  --argjson vlan "$VLAN_ID" \
+  --arg class_id "1:$VLAN_ID" \
+  --arg vlan_str "$VLAN_ID" \
+  '{
     node: .node,
     interface: .interface,
     isAligned: .isAligned,
-    classId: $cid,
-    matched_name: $targetName,
-    desired_class: (.desired.classes[] | select(.classId == $cid)),
-    actual_egress_class: (.actual.classes[] | select(.classId == $cid)),
-    actual_ingress_filter: (.actual.ingressFilters[] | select(.name == $targetName)),
-    drift_deltas: [.driftDeltas[]? | select(.classId == $cid or .name == $targetName or .target == $targetName)]
+    desired: (.desired.classes[] | select(.vlanId == $vlan or .classId == $class_id)),
+    actual_class: (.actual.classes[] | select(.vlanId == $vlan or .classId == $class_id)),
+    ingressFilters: [.actual.ingressFilters[] | select(.vlanId == $vlan or .matches.vlan_id == $vlan_str)]
   }'
 ```
 

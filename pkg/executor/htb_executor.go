@@ -27,6 +27,8 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 		return FlushInterface(iface)
 	}
 
+	isIfbInterface := strings.HasPrefix(iface, "ifb-")
+
 	rootHandle := spec.HtbID
 	if rootHandle <= 0 {
 		rootHandle = 1
@@ -58,7 +60,7 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 	log.Info("[HTB] Running Orphan Class Prune Pass...", "interface", iface, "desiredClassCount", len(desiredClasses))
 	PruneOrphanedClasses(iface, rootHandle, desiredClasses, log)
 
-	// Attach root HTB qdisc and parent classes ONLY if egress spec.Rate is provided
+	// Attach root HTB qdisc and parent classes if rate is provided
 	if spec.Rate != "" {
 		cmdRoot := execHostCommand("tc", "qdisc", "add", "dev", iface, "root", "handle", rootHandleStr, "htb", "default", fmt.Sprintf("%d", defaultMinor))
 		_ = cmdRoot.Run()
@@ -86,7 +88,7 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 			_ = out
 		}
 	} else {
-		log.Info("[HTB] Skip root HTB egress qdisc setup (ingress-only spec)", "interface", iface)
+		log.Info("[HTB] Skip root HTB egress qdisc setup", "interface", iface)
 	}
 
 	// Child classes
@@ -98,19 +100,32 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 			classHandle = fmt.Sprintf("%d:%d", rootHandle, c.ClassMinor)
 		}
 
-		// Skip egress HTB class setup for ingress-only class definitions
-		if c.EgressRate == "" && c.IngressRate != "" {
-			log.Info("[HTB] Ingress-only class detected; skipping egress HTB class setup", "interface", iface, "classHandle", classHandle)
+		var rate, ceil, burst string
+		if isIfbInterface {
+			rate = c.IngressRate
+			ceil = c.IngressCeil
+			burst = c.IngressBurst
+		} else {
+			rate = c.EgressRate
+			ceil = c.EgressCeil
+			burst = c.EgressBurst
+		}
+
+		if rate == "" {
+			rate = c.EgressRate
+			if rate == "" {
+				rate = c.IngressRate
+			}
+		}
+
+		if rate == "" {
+			log.Info("[HTB] Skipping class setup due to empty rate", "interface", iface, "classHandle", classHandle)
 			continue
 		}
 
-		rate := c.EgressRate
-		ceil := c.EgressCeil
 		if ceil == "" {
 			ceil = rate
 		}
-
-		burst := c.EgressBurst
 		if burst == "" {
 			burst = "15k"
 		}
@@ -158,7 +173,7 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 			filterPrio = 49152
 		}
 
-		log.Info("[HTB] Reconciling egress filter rule", "interface", iface, "strategy", desc, "targetClass", classHandle, "prio", filterPrio)
+		log.Info("[HTB] Reconciling filter rule", "interface", iface, "strategy", desc, "targetClass", classHandle, "prio", filterPrio)
 
 		filterParentStr := fmt.Sprintf("%d:0", rootHandle)
 
@@ -185,7 +200,7 @@ func ApplyHtbHierarchy(spec *networkingv1alpha1.HtbRootSpec, log logr.Logger) er
 			filterAddArgs := append([]string{"tc", "filter", "add"}, filterArgs[3:]...)
 			cmdAddFilter := execHostCommand(filterAddArgs[0], filterAddArgs[1:]...)
 			if outAdd, errAdd := cmdAddFilter.CombinedOutput(); errAdd != nil {
-				log.Error(errAdd, "[HTB] Error: Failed adding egress filter after flush", "class", classHandle, "output", string(outAdd))
+				log.Error(errAdd, "[HTB] Error: Failed adding filter after flush", "class", classHandle, "output", string(outAdd))
 			}
 		}
 	}

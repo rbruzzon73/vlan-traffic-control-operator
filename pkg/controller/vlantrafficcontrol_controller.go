@@ -81,7 +81,7 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if controllerutil.ContainsFinalizer(&instance, vlanTrafficControlFinalizer) {
 			logger.Info("Performing finalizer cleanup for VlanTrafficControl", "name", instance.Name)
 
-			r.updateStatusWithRetry(ctx, req.NamespacedName, func(cr *v1alpha1.VlanTrafficControl) {
+			_ = r.updateStatusWithRetry(ctx, req.NamespacedName, func(cr *v1alpha1.VlanTrafficControl) {
 				r.updateStatusCondition(cr, TypeReady, metav1.ConditionFalse, ReasonDeleting, "Cleaning up TC rules and IFB virtual devices on target node agents")
 			})
 
@@ -106,9 +106,9 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 				}
 			}
 
-			controllerutil.RemoveFinalizer(&instance, vlanTrafficControlFinalizer)
-			if err := r.Update(ctx, &instance); err != nil {
-				logger.Error(err, "Failed to remove finalizer")
+			// Safe removal with RetryOnConflict to avoid resourceVersion mismatch
+			if err := r.removeFinalizerWithRetry(ctx, req.NamespacedName); err != nil {
+				logger.Error(err, "Failed to remove finalizer after retries")
 				return ctrl.Result{}, err
 			}
 			logger.Info("Successfully finalized VlanTrafficControl and updated node TC rules")
@@ -127,9 +127,8 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// 2. Ensure Finalizer is Present
 	if !controllerutil.ContainsFinalizer(&instance, vlanTrafficControlFinalizer) {
-		controllerutil.AddFinalizer(&instance, vlanTrafficControlFinalizer)
-		if err := r.Update(ctx, &instance); err != nil {
-			logger.Error(err, "Failed to add finalizer")
+		if err := r.addFinalizerWithRetry(ctx, req.NamespacedName); err != nil {
+			logger.Error(err, "Failed to add finalizer after retries")
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -180,7 +179,7 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if errors.IsNotFound(err) {
 			logger.Info("Creating Agent DaemonSet across cluster nodes", "namespace", targetNamespace)
 			if err := r.Create(ctx, agentDaemonSet); err != nil {
-				r.updateStatusWithRetry(ctx, req.NamespacedName, func(cr *v1alpha1.VlanTrafficControl) {
+				_ = r.updateStatusWithRetry(ctx, req.NamespacedName, func(cr *v1alpha1.VlanTrafficControl) {
 					r.updateStatusCondition(cr, TypeReady, metav1.ConditionFalse, ReasonFailed, fmt.Sprintf("Failed to create DaemonSet: %v", err))
 				})
 				return ctrl.Result{}, fmt.Errorf("failed to create Agent DaemonSet: %w", err)
@@ -217,7 +216,7 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 			}
 
 			if err := r.Update(ctx, &existingDS); err != nil {
-				r.updateStatusWithRetry(ctx, req.NamespacedName, func(cr *v1alpha1.VlanTrafficControl) {
+				_ = r.updateStatusWithRetry(ctx, req.NamespacedName, func(cr *v1alpha1.VlanTrafficControl) {
 					r.updateStatusCondition(cr, TypeReady, metav1.ConditionFalse, ReasonFailed, fmt.Sprintf("Failed to update DaemonSet: %v", err))
 				})
 				return ctrl.Result{}, fmt.Errorf("failed to update Agent DaemonSet: %w", err)
@@ -256,7 +255,39 @@ func (r *VlanTrafficControlReconciler) Reconcile(ctx context.Context, req ctrl.R
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
 }
 
-// reconcileClassProjections keeps secondary VlanTrafficControlClass projection resources updated, deduplicating classes per CR
+func (r *VlanTrafficControlReconciler) addFinalizerWithRetry(ctx context.Context, namespacedName types.NamespacedName) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latestCR := &v1alpha1.VlanTrafficControl{}
+		if err := r.Get(ctx, namespacedName, latestCR); err != nil {
+			return err
+		}
+		controllerutil.AddFinalizer(latestCR, vlanTrafficControlFinalizer)
+		return r.Update(ctx, latestCR)
+	})
+}
+
+func (r *VlanTrafficControlReconciler) removeFinalizerWithRetry(ctx context.Context, namespacedName types.NamespacedName) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latestCR := &v1alpha1.VlanTrafficControl{}
+		if err := r.Get(ctx, namespacedName, latestCR); err != nil {
+			return err
+		}
+		controllerutil.RemoveFinalizer(latestCR, vlanTrafficControlFinalizer)
+		return r.Update(ctx, latestCR)
+	})
+}
+
+func (r *VlanTrafficControlReconciler) updateStatusWithRetry(ctx context.Context, namespacedName types.NamespacedName, updateFn func(cr *v1alpha1.VlanTrafficControl)) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latestCR := &v1alpha1.VlanTrafficControl{}
+		if err := r.Get(ctx, namespacedName, latestCR); err != nil {
+			return err
+		}
+		updateFn(latestCR)
+		return r.Status().Update(ctx, latestCR)
+	})
+}
+
 func (r *VlanTrafficControlReconciler) reconcileClassProjections(ctx context.Context, vtc *v1alpha1.VlanTrafficControl) error {
 	seenClassIDs := make(map[string]bool)
 
@@ -269,7 +300,6 @@ func (r *VlanTrafficControlReconciler) reconcileClassProjections(ctx context.Con
 
 		projName := fmt.Sprintf("%s-%s", vtc.Name, cls.Name)
 
-		// Determine direction metadata dynamically
 		direction := "ingress+egress"
 		if cls.IngressRate != "" && cls.EgressRate == "" {
 			direction = "ingress"
@@ -329,17 +359,6 @@ func (r *VlanTrafficControlReconciler) reconcileClassProjections(ctx context.Con
 		}
 	}
 	return nil
-}
-
-func (r *VlanTrafficControlReconciler) updateStatusWithRetry(ctx context.Context, namespacedName types.NamespacedName, updateFn func(cr *v1alpha1.VlanTrafficControl)) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		latestCR := &v1alpha1.VlanTrafficControl{}
-		if err := r.Get(ctx, namespacedName, latestCR); err != nil {
-			return err
-		}
-		updateFn(latestCR)
-		return r.Status().Update(ctx, latestCR)
-	})
 }
 
 func (r *VlanTrafficControlReconciler) setOperatorDeploymentOwnerRef(ctx context.Context, ds *appsv1.DaemonSet, namespace string) error {
@@ -455,7 +474,7 @@ func getAgentImage() string {
 	if img := os.Getenv("RELATED_IMAGE_AGENT"); img != "" {
 		return img
 	}
-	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.3.94"
+	return "ghcr.io/rbruzzon73/vlan-traffic-control-agent:v0.3.96"
 }
 
 func (r *VlanTrafficControlReconciler) buildAgentDaemonSet(

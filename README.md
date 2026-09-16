@@ -1563,7 +1563,7 @@ LATENCY & PROCESSING OVERHEAD COMPARISON BY TC STRATEGY
 - Deploy the VLAN Traffic Control Operator from the OpenShift VLAN Traffic Control catalog source within Red Hat OpenShift 4.
 
      - Points Of Attention:
-        - The latest version of the VLAN Traffic Control Operator is **0.3.94**, which was released on September 16, 2026.
+        - The latest version of the VLAN Traffic Control Operator is **0.3.96**, which was released on September 16, 2026.
         - Please note that the images included in the following section are for illustrative purposes only and may not represent the most recent version released.
 
 ```yaml

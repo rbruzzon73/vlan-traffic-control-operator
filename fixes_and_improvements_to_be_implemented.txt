@@ -1,15 +1,24 @@
-#-------------- OPEN POINTS --------------#
+
+#-------------- FIX RELEASED IN 0.3.130 --------------#
 
 1) test-custom-htbid-suite.sh failed
    Logs in ./vtc-custom-htbid-test-logs-20260916_001505
    Direct references to "1:99" in cmd/agent/main.go and pkg/executor/alignment.go to be removed [1]
 
-2) Additional configuration improvements [2]:
+2) Fix on Stats and Config APIs in multi-htbId
+
+
+#-------------- OPEN POINTS --------------#
+
+1) Additional configuration improvements [2]:
       - Burst defined in the ClassSpec but Cburst missing
       - Ingress and Egress default Burst to be aligned
 
 
-#---------------- Details ----------------#
+
+
+
+#---------------- Initial nodes ----------------#
 
 [1] Fix to be implemented 
 

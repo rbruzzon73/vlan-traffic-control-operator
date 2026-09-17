@@ -10,6 +10,40 @@ import (
 	networkingv1alpha1 "networking.med.io/vlan-traffic-control/api/v1alpha1"
 )
 
+type NodeAlignmentReport struct {
+	Node        string                         `json:"node"`
+	Interface   string                         `json:"interface"`
+	IsAligned   bool                           `json:"isAligned"`
+	Desired     networkingv1alpha1.HtbRootSpec `json:"desired"`
+	Actual      ActualTcState                  `json:"actual"`
+	DriftDeltas []string                       `json:"driftDeltas"`
+}
+
+type ActualTcState struct {
+	Interface       string                         `json:"interface"`
+	IfbInterface    string                         `json:"ifbInterface,omitempty"`
+	HtbQdiscPresent bool                           `json:"htbQdiscPresent"`
+	IngressPresent  bool                           `json:"ingressPresent"`
+	ClsactPresent   bool                           `json:"clsactPresent"`
+	Classes         []networkingv1alpha1.ClassSpec `json:"classes"`
+	IngressFilters  []ActualFilterSpec             `json:"ingressFilters"`
+}
+
+type ActualFilterSpec struct {
+	Priority    uint16            `json:"priority"`
+	Handle      uint32            `json:"handle"`
+	Interface   string            `json:"interface"`
+	Type        string            `json:"type"`
+	Protocol    uint16            `json:"protocol"`
+	Name        string            `json:"name,omitempty"`
+	MatchType   string            `json:"matchType,omitempty"`
+	VlanID      int               `json:"vlanId,omitempty"`
+	Subnet      string            `json:"subnet,omitempty"`
+	IngressRate string            `json:"ingressRate,omitempty"`
+	Action      string            `json:"action"`
+	Matches     map[string]string `json:"matches,omitempty"`
+}
+
 // Helper: Format raw bytes/sec from netlink into human-readable TC rate string
 func formatRateBps(rateBytes uint64) string {
 	if rateBytes == 0 {
@@ -29,8 +63,8 @@ func formatRateBps(rateBytes uint64) string {
 }
 
 // InspectNodeAlignment inspects whether existing host netlink state matches the desired CR spec
-// and builds a full NodeConfigReport required by GET /config endpoints.
-func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrategy networkingv1alpha1.TcStrategyType, targetClassID string) (*networkingv1alpha1.NodeConfigReport, error) {
+// and builds a full NodeAlignmentReport required by GET /config endpoints.
+func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrategy networkingv1alpha1.TcStrategyType, targetClassID string) (*NodeAlignmentReport, error) {
 	nodeName := os.Getenv("NODE_NAME")
 	if nodeName == "" {
 		nodeName, _ = os.Hostname()
@@ -40,33 +74,27 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrateg
 		return nil, fmt.Errorf("desired spec is nil")
 	}
 
-	report := &networkingv1alpha1.NodeConfigReport{
+	report := &NodeAlignmentReport{
 		Node:        nodeName,
 		Interface:   desired.Interface,
 		IsAligned:   true,
 		Desired:     *desired,
-		DriftDeltas: make([]networkingv1alpha1.ConfigDriftDelta, 0),
+		DriftDeltas: make([]string, 0),
 	}
 
 	report.Actual.Interface = desired.Interface
 	report.Actual.Classes = make([]networkingv1alpha1.ClassSpec, 0)
-	report.Actual.IngressFilters = make([]networkingv1alpha1.FilterMeta, 0)
+	report.Actual.IngressFilters = make([]ActualFilterSpec, 0)
 
 	rootHandle := desired.HtbID
 	if rootHandle <= 0 {
 		rootHandle = 1
 	}
-	expectedRootHandle := netlink.MakeHandle(uint16(rootHandle), 0)
 
 	physLink, err := netlink.LinkByName(desired.Interface)
 	if err != nil {
 		report.IsAligned = false
-		report.DriftDeltas = append(report.DriftDeltas, networkingv1alpha1.ConfigDriftDelta{
-			TargetHandle: fmt.Sprintf("interface %s", desired.Interface),
-			Property:     "existence",
-			Expected:     "present on host",
-			Actual:       "missing device",
-		})
+		report.DriftDeltas = append(report.DriftDeltas, fmt.Sprintf("interface %s missing on host", desired.Interface))
 		return report, nil
 	}
 
@@ -86,7 +114,7 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrateg
 	qdiscs, err := netlink.QdiscList(physLink)
 	if err == nil {
 		for _, q := range qdiscs {
-			if q.Type() == "htb" && q.Attrs().Handle == expectedRootHandle {
+			if q.Type() == "htb" {
 				report.Actual.HtbQdiscPresent = true
 			}
 			if q.Type() == "clsact" || q.Type() == "ingress" {
@@ -126,11 +154,11 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrateg
 	// 2. Inspect HTB Classes
 	classSpecsMap := make(map[string]*networkingv1alpha1.ClassSpec)
 
-	if classes, err := netlink.ClassList(physLink, expectedRootHandle); err == nil {
+	if classes, err := netlink.ClassList(physLink, 0); err == nil {
 		for _, c := range classes {
 			if htb, ok := c.(*netlink.HtbClass); ok {
 				classID := netlink.HandleStr(htb.Attrs().Handle)
-				if classID == fmt.Sprintf("%d:1", rootHandle) {
+				if strings.HasSuffix(classID, ":1") {
 					continue
 				}
 				spec := &networkingv1alpha1.ClassSpec{
@@ -145,11 +173,11 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrateg
 	}
 
 	if isIfbActive {
-		if classes, err := netlink.ClassList(ifbLink, expectedRootHandle); err == nil {
+		if classes, err := netlink.ClassList(ifbLink, 0); err == nil {
 			for _, c := range classes {
 				if htb, ok := c.(*netlink.HtbClass); ok {
 					classID := netlink.HandleStr(htb.Attrs().Handle)
-					if classID == fmt.Sprintf("%d:1", rootHandle) {
+					if strings.HasSuffix(classID, ":1") {
 						continue
 					}
 					existing, found := classSpecsMap[classID]
@@ -164,8 +192,14 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrateg
 		}
 	}
 
+	defaultMinor := 99
+	if desired.DefaultClassMinor > 0 {
+		defaultMinor = desired.DefaultClassMinor
+	}
+
 	for classID, spec := range classSpecsMap {
-		if desSpec, matched := desiredClassMap[classID]; matched {
+		desSpec, matched := desiredClassMap[classID]
+		if matched {
 			spec.Name = desSpec.Name
 			spec.MatchType = desSpec.MatchType
 			spec.VlanID = desSpec.VlanID
@@ -189,36 +223,42 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrateg
 				spec.IngressCeil = desSpec.IngressCeil
 			}
 		}
-		if spec.Name == "" && (classID == "1:99" || classID == fmt.Sprintf("%d:99", rootHandle)) {
+
+		isDefaultFallback := spec.Priority == 0 ||
+			classID == fmt.Sprintf("%d:%d", rootHandle, defaultMinor) ||
+			strings.HasSuffix(classID, fmt.Sprintf(":%d", defaultMinor)) ||
+			(matched && strings.Contains(strings.ToLower(desSpec.Name), "default"))
+
+		if spec.Name == "" && isDefaultFallback {
 			spec.Name = "default-fallback"
 		}
 		report.Actual.Classes = append(report.Actual.Classes, *spec)
 	}
 
-	// 3. Inspect Filters (Purge stale physical parent ffff: filters if IFB strategy active)
+	// 3. Inspect Filters
 	type scanTarget struct {
 		link    netlink.Link
 		handles []uint32
 	}
 
+	rootHtbParentHandle := netlink.MakeHandle(uint16(rootHandle), 0)
+	clsactIngressHandle := netlink.MakeHandle(0xffff, 2)
+
 	var scanTargets []scanTarget
 
 	if isIfbActive {
-		// IFB Active: Scan ONLY ingress handle on Physical (mirred redirect), and ingress handle on IFB
 		scanTargets = append(scanTargets, scanTarget{
 			link:    physLink,
-			handles: []uint32{netlink.HANDLE_INGRESS},
+			handles: []uint32{0, netlink.HANDLE_INGRESS, clsactIngressHandle},
 		})
 		scanTargets = append(scanTargets, scanTarget{
 			link:    ifbLink,
-			handles: []uint32{netlink.HANDLE_INGRESS},
+			handles: []uint32{0, netlink.HANDLE_INGRESS, rootHtbParentHandle, netlink.MakeHandle(1, 0)},
 		})
 	} else {
-		// Flower Active: Scan ingress & legacy parent ffff: on physical interface
-		clsactIngressHandle := netlink.MakeHandle(0xffff, 2)
 		scanTargets = append(scanTargets, scanTarget{
 			link:    physLink,
-			handles: []uint32{netlink.HANDLE_INGRESS, netlink.HANDLE_MIN_INGRESS, clsactIngressHandle},
+			handles: []uint32{0, netlink.HANDLE_INGRESS, rootHtbParentHandle, netlink.HANDLE_MIN_INGRESS, clsactIngressHandle},
 		})
 	}
 
@@ -246,15 +286,9 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrateg
 				}
 				seenFilters[dedupKey] = true
 
-				var chainVal uint32
-				if attrs.Chain != nil {
-					chainVal = *attrs.Chain
-				}
-
-				meta := networkingv1alpha1.FilterMeta{
+				meta := ActualFilterSpec{
 					Priority:  attrs.Priority,
 					Handle:    attrs.Handle,
-					Chain:     chainVal,
 					Interface: scanIfaceName,
 					Type:      f.Type(),
 					Protocol:  attrs.Protocol,
@@ -262,7 +296,8 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrateg
 					Matches:   make(map[string]string),
 				}
 
-				if desSpec, matched := desiredPrioMap[attrs.Priority]; matched {
+				desSpec, matched := desiredPrioMap[attrs.Priority]
+				if matched {
 					meta.Name = desSpec.Name
 					meta.MatchType = desSpec.MatchType
 					if meta.VlanID == 0 {
@@ -271,13 +306,24 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrateg
 					if meta.Subnet == "" {
 						meta.Subnet = desSpec.Subnet
 					}
-					meta.Mark = desSpec.Mark
 					meta.IngressRate = desSpec.IngressRate
-					meta.IngressBurst = desSpec.IngressBurst
 
-					actStr := desSpec.GetIngressAction()
-					if actStr != "" {
-						meta.Action = fmt.Sprintf("police %s", actStr)
+					if isVirtual {
+						meta.Action = "htb classify"
+					} else {
+						actStr := desSpec.GetIngressAction()
+						if actStr != "" {
+							meta.Action = fmt.Sprintf("police %s", actStr)
+						}
+					}
+				}
+
+				if f.Type() == "fw" || (matched && desSpec.MatchType == "mark") {
+					meta.Type = "fw"
+					meta.MatchType = "mark"
+					meta.Matches["mark"] = fmt.Sprintf("%d", attrs.Handle)
+					if isVirtual {
+						meta.Action = "htb classify"
 					}
 				}
 
@@ -291,10 +337,6 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrateg
 					continue
 				}
 
-				if isVirtual {
-					meta.Action = "htb classify"
-				}
-
 				if flower, ok := f.(*netlink.Flower); ok {
 					if flower.VlanId != 0 {
 						meta.VlanID = int(flower.VlanId)
@@ -306,13 +348,6 @@ func InspectNodeAlignment(desired *networkingv1alpha1.HtbRootSpec, activeStrateg
 						meta.Subnet = ipStr
 						meta.Matches["dst_ip"] = ipStr
 					}
-				}
-
-				if f.Type() == "fw" {
-					meta.Type = "fw"
-					meta.MatchType = "mark"
-					meta.Mark = uint32(attrs.Handle)
-					meta.Matches["mark"] = fmt.Sprintf("%d", attrs.Handle)
 				}
 
 				report.Actual.IngressFilters = append(report.Actual.IngressFilters, meta)

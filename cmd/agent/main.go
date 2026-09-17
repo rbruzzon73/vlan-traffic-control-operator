@@ -40,6 +40,11 @@ type NodeMultiInterfaceStatsResponse struct {
 	Interfaces []networkingv1alpha1.InterfaceStats `json:"interfaces"`
 }
 
+type NodeMultiInterfaceConfigResponse struct {
+	Node    string                         `json:"node"`
+	Reports []executor.NodeAlignmentReport `json:"reports"`
+}
+
 func main() {
 	zapLog, err := zap.NewDevelopment()
 	if err != nil {
@@ -91,8 +96,8 @@ func main() {
 
 		hostNode := getHostNode(ctx, k8sClient, nodeName, log)
 
-		classMap := make(map[string]string)
-		defaultClassHandles := make(map[string]bool)
+		// Group CRD specs by interface
+		specsByIface := make(map[string]*networkingv1alpha1.HtbRootSpec)
 
 		var list networkingv1alpha1.VlanTrafficControlList
 		if err := k8sClient.List(ctx, &list); err == nil {
@@ -101,29 +106,33 @@ func main() {
 					continue
 				}
 
-				rootHandle := item.Spec.HtbRoot.HtbID
-				if rootHandle <= 0 {
-					rootHandle = 1
+				crIface := item.Spec.HtbRoot.Interface
+				if crIface == "" {
+					crIface = "enp1s0"
 				}
 
-				defaultHandle := resolveDefaultClassHandle(&item.Spec.HtbRoot, rootHandle)
-				defaultClassHandles[defaultHandle] = true
-				if _, exists := classMap[defaultHandle]; !exists {
-					classMap[defaultHandle] = "default-fallback"
+				aggSpec, exists := specsByIface[crIface]
+				if !exists {
+					aggSpec = &networkingv1alpha1.HtbRootSpec{
+						Interface:         crIface,
+						HtbID:             item.Spec.HtbRoot.HtbID,
+						Rate:              item.Spec.HtbRoot.Rate,
+						DefaultClassID:    item.Spec.HtbRoot.DefaultClassID,
+						DefaultClassMinor: item.Spec.HtbRoot.DefaultClassMinor,
+						Classes:           []networkingv1alpha1.ClassSpec{},
+					}
+					specsByIface[crIface] = aggSpec
+				}
+
+				if item.Spec.HtbRoot.HtbID > 0 {
+					aggSpec.HtbID = item.Spec.HtbRoot.HtbID
 				}
 
 				for _, cls := range item.Spec.HtbRoot.Classes {
-					cHandle := cls.GetClassID(rootHandle)
-					if cls.Name != "" {
-						classMap[cHandle] = cls.Name
-					}
+					clsCopy := cls
+					aggSpec.Classes = append(aggSpec.Classes, clsCopy)
 				}
 			}
-		}
-
-		if len(defaultClassHandles) == 0 {
-			defaultClassHandles["1:99"] = true
-			classMap["1:99"] = "default-fallback"
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -133,7 +142,16 @@ func main() {
 			allStats := make([]networkingv1alpha1.InterfaceStats, 0)
 
 			for _, iface := range activeIfaces {
-				st, errStats := executor.GetInterfaceStatsFiltered(iface, classMap, targetVlan, targetClassID)
+				if strings.HasPrefix(iface, "ifb-") {
+					continue
+				}
+
+				spec := specsByIface[iface]
+				if spec == nil {
+					spec = &networkingv1alpha1.HtbRootSpec{Interface: iface, HtbID: 1}
+				}
+
+				st, errStats := executor.GetInterfaceStats(iface, spec)
 				if errStats == nil && st != nil {
 					st.Node = nodeName
 					if classNameParam != "" {
@@ -166,24 +184,30 @@ func main() {
 			ifaceParam = strings.TrimSuffix(ifaceParam, ".default")
 		}
 
-		stats, errStats := executor.GetInterfaceStatsFiltered(ifaceParam, classMap, targetVlan, targetClassID)
+		spec := specsByIface[ifaceParam]
+		if spec == nil {
+			spec = &networkingv1alpha1.HtbRootSpec{Interface: ifaceParam, HtbID: 1}
+		}
+
+		stats, errStats := executor.GetInterfaceStats(ifaceParam, spec)
 		if errStats != nil {
 			http.Error(w, fmt.Sprintf("failed retrieving stats: %v", errStats), http.StatusInternalServerError)
 			return
 		}
 		stats.Node = nodeName
 
-		if isDefaultQuery || classNameParam != "" {
-			defaultClasses := make([]networkingv1alpha1.ClassStat, 0)
+		if isDefaultQuery || classNameParam != "" || targetClassID != "" || targetVlan > 0 {
+			filteredClasses := make([]networkingv1alpha1.ClassStat, 0)
 			for _, cs := range stats.ClassStats {
-				if isDefaultQuery && (defaultClassHandles[cs.ClassID] || cs.ClassName == "default-fallback") {
-					defaultClasses = append(defaultClasses, cs)
-				} else if classNameParam != "" && cs.ClassName == classNameParam {
-					defaultClasses = append(defaultClasses, cs)
+				if targetClassID != "" && cs.ClassID != targetClassID {
+					continue
 				}
+				if classNameParam != "" && cs.ClassName != classNameParam {
+					continue
+				}
+				filteredClasses = append(filteredClasses, cs)
 			}
-			stats.ClassStats = defaultClasses
-			stats.IngressStats = make([]networkingv1alpha1.IngressStat, 0)
+			stats.ClassStats = filteredClasses
 		}
 
 		w.WriteHeader(http.StatusOK)
@@ -287,74 +311,52 @@ func main() {
 			return
 		}
 
+		targetClassID := r.URL.Query().Get("classId")
 		requestedIface := strings.TrimSpace(r.URL.Query().Get("interface"))
 
-		if requestedIface == "" {
-			for _, item := range list.Items {
-				if isPolicyTargetingNode(hostNode, nodeName, &item, log) && item.Spec.HtbRoot.Interface != "" {
-					requestedIface = item.Spec.HtbRoot.Interface
-					break
-				}
-			}
-		}
-
-		if requestedIface == "" {
-			discovered := discoverActiveTcInterfaces(log)
-			if len(discovered) > 0 {
-				requestedIface = discovered[0]
-			} else {
-				requestedIface = "enp1s0"
-			}
-		}
-
-		targetClassID := r.URL.Query().Get("classId")
-
-		var aggregatedSpec networkingv1alpha1.HtbRootSpec
-		aggregatedSpec.Interface = requestedIface
-		aggregatedSpec.Rate = "10Gbit"
-		aggregatedSpec.Classes = make([]networkingv1alpha1.ClassSpec, 0)
-
-		hasMatchingPolicy := false
-		activeStrategy := networkingv1alpha1.TcStrategyType("flower")
-		classMap := make(map[string]*networkingv1alpha1.ClassSpec)
+		specsByInterface := make(map[string]*networkingv1alpha1.HtbRootSpec)
+		strategyByInterface := make(map[string]networkingv1alpha1.TcStrategyType)
+		classMapsByInterface := make(map[string]map[string]*networkingv1alpha1.ClassSpec)
 
 		for _, item := range list.Items {
-			crIface := item.Spec.HtbRoot.Interface
-			if crIface == "" {
-				crIface = requestedIface
-			}
-
-			if crIface != requestedIface {
-				continue
-			}
-
 			if !isPolicyTargetingNode(hostNode, nodeName, &item, log) {
 				continue
 			}
 
-			hasMatchingPolicy = true
-			if strings.ToLower(string(item.Spec.TcStrategy)) == "ifb" {
-				activeStrategy = item.Spec.TcStrategy
-			} else if activeStrategy != "ifb" && item.Spec.TcStrategy != "" {
-				activeStrategy = item.Spec.TcStrategy
+			crIface := item.Spec.HtbRoot.Interface
+			if crIface == "" {
+				crIface = "enp1s0"
 			}
 
-			if item.Spec.HtbRoot.HtbID > 0 {
-				aggregatedSpec.HtbID = item.Spec.HtbRoot.HtbID
-			}
-			if item.Spec.HtbRoot.DefaultClassID != "" {
-				aggregatedSpec.DefaultClassID = item.Spec.HtbRoot.DefaultClassID
-			}
-			if item.Spec.HtbRoot.Rate != "" {
-				aggregatedSpec.Rate = item.Spec.HtbRoot.Rate
+			aggSpec, exists := specsByInterface[crIface]
+			if !exists {
+				aggSpec = &networkingv1alpha1.HtbRootSpec{
+					Interface:         crIface,
+					HtbID:             item.Spec.HtbRoot.HtbID,
+					Rate:              item.Spec.HtbRoot.Rate,
+					DefaultClassID:    item.Spec.HtbRoot.DefaultClassID,
+					DefaultClassMinor: item.Spec.HtbRoot.DefaultClassMinor,
+					Classes:           []networkingv1alpha1.ClassSpec{},
+				}
+				specsByInterface[crIface] = aggSpec
+				strategyByInterface[crIface] = item.Spec.TcStrategy
+				classMapsByInterface[crIface] = make(map[string]*networkingv1alpha1.ClassSpec)
+			} else {
+				if item.Spec.HtbRoot.HtbID > 0 {
+					aggSpec.HtbID = item.Spec.HtbRoot.HtbID
+				}
+				if strings.ToLower(string(item.Spec.TcStrategy)) == "ifb" {
+					strategyByInterface[crIface] = item.Spec.TcStrategy
+				}
 			}
 
+			cMap := classMapsByInterface[crIface]
 			for _, cls := range item.Spec.HtbRoot.Classes {
-				cID := cls.GetClassID(aggregatedSpec.HtbID)
-				existing, found := classMap[cID]
+				cID := cls.GetClassID(aggSpec.HtbID)
+				existing, found := cMap[cID]
 				if !found {
 					clsCopy := cls
-					classMap[cID] = &clsCopy
+					cMap[cID] = &clsCopy
 				} else {
 					if cls.IngressRate != "" {
 						existing.IngressRate = cls.IngressRate
@@ -374,34 +376,74 @@ func main() {
 			}
 		}
 
-		for _, cls := range classMap {
-			aggregatedSpec.Classes = append(aggregatedSpec.Classes, *cls)
-		}
-
-		if !hasMatchingPolicy {
-			log.Info("[CONFIG] No active VlanTrafficControl policy targets interface on this node", "nodeName", nodeName, "interface", requestedIface)
-		}
-
-		report, err := executor.InspectNodeAlignment(&aggregatedSpec, activeStrategy, targetClassID)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("alignment check failed: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		report.Node = nodeName
-		report.Interface = requestedIface
-		report.Actual.Interface = requestedIface
-		if strings.ToLower(string(activeStrategy)) == "ifb" {
-			ifbDevName := fmt.Sprintf("ifb-%s", requestedIface)
-			if len(ifbDevName) > 15 {
-				ifbDevName = ifbDevName[:15]
+		for iface, aggSpec := range specsByInterface {
+			cMap := classMapsByInterface[iface]
+			for _, cls := range cMap {
+				aggSpec.Classes = append(aggSpec.Classes, *cls)
 			}
-			report.Actual.IfbInterface = ifbDevName
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+
+		if requestedIface != "" {
+			aggSpec, found := specsByInterface[requestedIface]
+			if !found {
+				aggSpec = &networkingv1alpha1.HtbRootSpec{Interface: requestedIface, Rate: "10Gbit"}
+			}
+			activeStrategy := strategyByInterface[requestedIface]
+			if activeStrategy == "" {
+				activeStrategy = "flower"
+			}
+
+			report, err := executor.InspectNodeAlignment(aggSpec, activeStrategy, targetClassID)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("alignment check failed: %v", err), http.StatusInternalServerError)
+				return
+			}
+			report.Node = nodeName
+			report.Interface = requestedIface
+			report.Actual.Interface = requestedIface
+			if strings.ToLower(string(activeStrategy)) == "ifb" {
+				ifbDevName := fmt.Sprintf("ifb-%s", requestedIface)
+				if len(ifbDevName) > 15 {
+					ifbDevName = ifbDevName[:15]
+				}
+				report.Actual.IfbInterface = ifbDevName
+			}
+
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(report)
+			return
+		}
+
+		var reports []executor.NodeAlignmentReport
+		for iface, aggSpec := range specsByInterface {
+			activeStrategy := strategyByInterface[iface]
+			if activeStrategy == "" {
+				activeStrategy = "flower"
+			}
+
+			report, err := executor.InspectNodeAlignment(aggSpec, activeStrategy, targetClassID)
+			if err == nil && report != nil {
+				report.Node = nodeName
+				report.Interface = iface
+				report.Actual.Interface = iface
+				if strings.ToLower(string(activeStrategy)) == "ifb" {
+					ifbDevName := fmt.Sprintf("ifb-%s", iface)
+					if len(ifbDevName) > 15 {
+						ifbDevName = ifbDevName[:15]
+					}
+					report.Actual.IfbInterface = ifbDevName
+				}
+				reports = append(reports, *report)
+			}
+		}
+
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(report)
+		_ = json.NewEncoder(w).Encode(NodeMultiInterfaceConfigResponse{
+			Node:    nodeName,
+			Reports: reports,
+		})
 	})
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -420,20 +462,6 @@ func main() {
 		log.Error(err, "[FATAL] Agent HTTP server stopped unexpectedly")
 		os.Exit(1)
 	}
-}
-
-func resolveDefaultClassHandle(root *networkingv1alpha1.HtbRootSpec, rootHandle int) string {
-	if root.DefaultClassID != "" {
-		if strings.Contains(root.DefaultClassID, ":") {
-			return root.DefaultClassID
-		}
-		return fmt.Sprintf("%d:%s", rootHandle, root.DefaultClassID)
-	}
-	defaultMinor := root.DefaultClassMinor
-	if defaultMinor <= 0 {
-		defaultMinor = 99
-	}
-	return fmt.Sprintf("%d:%d", rootHandle, defaultMinor)
 }
 
 func discoverActiveTcInterfaces(log logr.Logger) []string {

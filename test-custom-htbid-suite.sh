@@ -3,7 +3,7 @@
 set -euo pipefail
 
 # ==============================================================================
-# Non-Standard htbId & Non-Default Class Mapping Validation Test (STRICT)
+# Non-Standard htbId & Non-Default Class Mapping Validation Test (DYNAMIC)
 # Validates custom htbId (e.g., 20, 30) and multi-attribute classes in both
 # IFB and Flower strategies against agent /config and /stats endpoints.
 # ==============================================================================
@@ -32,7 +32,7 @@ log_fail()  { echo -e "${RED}[FAIL]${NC} $1"; }
 log_dump()  { echo -e "${CYAN}[DUMP]${NC} $1"; }
 
 echo "======================================================================"
-echo " Starting STRICT Custom htbId & Non-Default Class Verification Suite"
+echo " Starting DYNAMIC Custom htbId & Non-Default Class Verification Suite"
 echo " Target Interface: ${PHYS_IFACE}"
 echo " Agent Endpoint:   http://${AGENT_NODE_IP}:8080"
 echo " Diagnostic Dir:   ${LOG_DIR}"
@@ -124,7 +124,7 @@ run_custom_htbid_test() {
   echo "${config_resp}" | jq .
   echo ""
 
-  log_info "4. Performing STRICT Kernel Actual State Assertions..."
+  log_info "4. Performing DYNAMIC Kernel Actual State Assertions..."
 
   # Assertion 1: Host alignment status
   local is_aligned
@@ -136,27 +136,50 @@ run_custom_htbid_test() {
   htb_present=$(echo "${config_resp}" | jq -r '.actual.htbQdiscPresent // false')
   assert_equals "${htb_present}" "true" "Actual Root HTB Qdisc Present in Kernel" || return 1
 
-  # Assertion 3: Verify Actual Egress HTB Classes Created in Kernel
-  local custom_vlan_class_id="${htb_id}:150"
-  local actual_class_count
+  # Assertion 3: Dynamic Class Count Match (Desired vs Actual)
+  local desired_class_count actual_class_count
+  desired_class_count=$(echo "${config_resp}" | jq -r '.desired.classes | length')
   actual_class_count=$(echo "${config_resp}" | jq -r '.actual.classes | length')
   
   if [ "${actual_class_count}" -eq 0 ]; then
-    log_fail "    ✗ [ASSERT ERROR] Actual Kernel HTB Classes Count: expected >0, got '0' (No HTB classes created!)"
+    log_fail "    ✗ [ASSERT ERROR] Actual Kernel HTB Classes Count: expected ${desired_class_count}, got '0' (No HTB classes created!)"
     return 1
-  else
-    log_pass "    ✓ [ASSERT] Actual Kernel HTB Classes Count: '${actual_class_count}'"
+  fi
+  assert_equals "${actual_class_count}" "${desired_class_count}" "Actual Kernel HTB Classes Count Match" || return 1
+
+  # Assertion 4: Verify Every Desired Class ID exists in Actual Kernel Classes
+  local missing_classes=0
+  while read -r class_id; do
+    [ -z "${class_id}" ] && continue
+    local class_exists
+    class_exists=$(echo "${config_resp}" | jq -r --arg cid "${class_id}" '[.actual.classes[] | select(.classId==$cid)] | length > 0')
+    assert_equals "${class_exists}" "true" "Kernel Actual HTB Class ID (${class_id}) Created" || missing_classes=$((missing_classes + 1))
+  done < <(echo "${config_resp}" | jq -r '.desired.classes[].classId')
+
+  if [ ${missing_classes} -gt 0 ]; then
+    return 1
   fi
 
-  # Assertion 4: Custom Class ID Existence in Actual Kernel Classes
-  local actual_vlan_class_exists
-  actual_vlan_class_exists=$(echo "${config_resp}" | jq -r --arg cid "${custom_vlan_class_id}" '[.actual.classes[] | select(.classId==$cid)] | length > 0')
-  assert_equals "${actual_vlan_class_exists}" "true" "Kernel Actual HTB Class ID (${custom_vlan_class_id}) Created" || return 1
+  # Assertion 5: Dynamic FW Mark Filter Verification based on CR Spec
+  local fwmark_class_info
+  fwmark_class_info=$(echo "${config_resp}" | jq -r '
+    .desired.classes[] | select(.matchType == "mark" or (.mark != null and .mark > 0)) | "\(.priority)|\(.name)"
+  ' | head -n 1)
 
-  # Assertion 5: Check Filter Programmed for Priority 5 (FW Mark)
-  local mark_filter_exists
-  mark_filter_exists=$(echo "${config_resp}" | jq -r '[.actual.ingressFilters[] | select(.priority==5 or .name=="fwmark-500-custom")] | length > 0')
-  assert_equals "${mark_filter_exists}" "true" "Kernel Actual Priority 5 (FW Mark) Filter Created" || return 1
+  if [ -n "${fwmark_class_info}" ]; then
+    local expected_prio expected_name
+    expected_prio=$(echo "${fwmark_class_info}" | cut -d'|' -f1)
+    expected_name=$(echo "${fwmark_class_info}" | cut -d'|' -f2)
+
+    local mark_filter_exists
+    mark_filter_exists=$(echo "${config_resp}" | jq -r --arg prio "${expected_prio}" --arg name "${expected_name}" '
+      [.actual.ingressFilters[] | select(.priority == ($prio | tonumber) or .name == $name)] | length > 0
+    ')
+
+    assert_equals "${mark_filter_exists}" "true" "Kernel Actual Priority ${expected_prio} (${expected_name}) Filter Created" || return 1
+  else
+    log_info "    ℹ No FW Mark class defined in spec, skipping mark filter assertion."
+  fi
 
   log_pass "✓ Strategy [${strategy}] with htbId [${htb_id}] successfully validated!"
   cleanup_resources

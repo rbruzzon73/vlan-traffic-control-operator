@@ -1,0 +1,36 @@
+apiVersion: networking.med.io/v1alpha1
+kind: VlanTrafficControl
+metadata:
+  name: ifb-vlan-tc-combined
+  namespace: openshift-vlan-tc-operator
+spec:
+  tcStrategy: ifb
+  reconcileIntervalSeconds: 60
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  htbRoot:
+    interface: enp1s0
+    rate: 10Gbit
+    htbId: 50
+    defaultClassId: "50:99"
+    defaultClassMinor: 99
+    classes:
+      - name: default-fallback
+        classId: "50:99"
+        priority: 0
+        egressRate: 10Gbit
+        egressCeil: 10Gbit
+        ingressRate: 10Gbit
+        ingressCeil: 10Gbit
+        enableFqCodel: true
+
+      - name: vlan-380-migration
+        classId: "50:380"
+        vlanId: 380
+        matchType: vlan
+        priority: 3
+        egressRate: 2Gbit
+        egressCeil: 10Gbit
+        ingressRate: 2Gbit
+        ingressCeil: 10Gbit
+        enableFqCodel: true
